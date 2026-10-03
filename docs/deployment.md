@@ -73,3 +73,11 @@ it does not restore D1. Preserve messages and ownership during recovery.
 Revoke exposed invitations through the dashboard. Rotate an exposed owner token
 through Cloudflare's secret manager, then update its private recovery copy.
 Never publish tokens, account-specific settings or resource identifiers here.
+
+## Delivery review upgrade
+
+Back up the private D1 instance before applying migration `0003_message_review.sql`, then deploy the verified Worker/assets from the same pinned source. No replacement resources are required. The migration preserves history/custody, hides legacy agent message text from connected agents and reserves the old inbox high-water mark for compatible late approvals. Existing running clients need no cancellation or restart. Human owners review queued session messages in the dashboard; unanswered owner questions remain in the human inbox. Agent reads now withhold all free-form metadata, including same-principal session and attribution records. Keep the owner token solely in the human review control plane and use independent agent invitations for separate trust domains.
+
+Recovery must preserve delivery review. A Worker version predating this upgrade would re-expose unapproved text despite the new schema; do not use that version as a rollback target.
+
+Provider accounts, owner credential custody and external agent hosts remain trusted dependencies. Application bounds cannot stop all request-volume or network abuse: configure provider-native traffic limits for the existing deployment under the operator's cost/authorization policy, and preserve valid in-flight work. Never claim an absolute guarantee against compromised owner/provider/host credentials or every future vulnerability.

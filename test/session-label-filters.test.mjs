@@ -18,7 +18,7 @@ async function invite(f,name,projects=['shared']){
 }
 async function register(f,actor,overrides={}){
   const result=await f.call(actor.token,'/api/sessions',{externalId:'codex:'+crypto.randomUUID(),machine:'reviewer-workstation.local',label:'Continue reviewed work',project:'shared',task:'Verify source',status:'RUNNING',...overrides});
-  assert.equal(result.status,201);return result.body.session;
+  assert.equal(result.status,201);return (await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===result.body.session.id);
 }
 async function attribute(f,actor,session,client,model,previousSegmentId=null){
   const result=await f.call(actor.token,`/api/sessions/${session.id}/attribution`,{provider:'test-provider',client,model,previousSegmentId,idempotencyKey:crypto.randomUUID()});
@@ -31,9 +31,8 @@ test('an in-app rename preserves stable session identity, attribution and owners
   await f.call(actor.token,'/api/ownership/claim',{sessionId:session.id,resourceKey:'review/source'});
   const renamed=await f.call(actor.token,`/api/sessions/${session.id}`,{label:'Review collection contract bindings'},'PATCH');
   assert.equal(renamed.status,200);
-  for(const key of ['id','externalId','machine','project','principalId','status','task'])assert.equal(renamed.body.session[key],session[key]);
-  assert.equal(renamed.body.session.label,'Review collection contract bindings');
-  assert.deepEqual(renamed.body.session.latestAttribution,{provider:'test-provider',client:'Codex',model:'GPT-6.1 Sol'});
+  const humanView=(await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===session.id);for(const key of ['id','externalId','machine','project','principalId','status','task'])assert.equal(humanView[key],session[key]);assert.equal(humanView.label,'Review collection contract bindings');assert.match(renamed.body.session.label,/^Session /);
+  assert.deepEqual(humanView.latestAttribution,{provider:'test-provider',client:'Codex',model:'GPT-6.1 Sol'});assert.equal(renamed.body.session.latestAttribution,null);
   const history=await f.call(actor.token,`/api/sessions/${session.id}/attribution`);
   assert.equal(history.body.segments.length,1);assert.equal(history.body.segments[0].id,segment.id);
   assert.equal(f.DB.database.prepare('SELECT owner_session_id FROM ownership').get().owner_session_id,session.id);
@@ -60,7 +59,7 @@ test('filters use only latest reporting segments and execution machine, with dis
   const noSegment=await register(f,actor);
   const literalUnknown=await register(f,actor);await attribute(f,actor,literalUnknown,'unknown',null);
   const privateSession=await register(f,privateActor,{project:'private',machine:'private-host'});await attribute(f,privateActor,privateSession,'private-agent','private-model');
-  let result=await f.call(actor.token,'/api/sessions?agentName=Claude&agentModel=Opus%205.5&machine=reviewer-workstation.local');
+  let result=await f.call(OWNER,'/api/sessions?project=shared&agentName=Claude&agentModel=Opus%205.5&machine=reviewer-workstation.local');
   assert.equal(result.status,200);assert.equal(result.body.total,1);assert.equal(result.body.sessions[0].id,switched.id);
   assert.deepEqual(new Set(result.body.filterOptions.agentNames),new Set(['Codex','Claude','unknown',null]));
   assert.equal(result.body.filterOptions.machines.includes('private-host'),false);
@@ -79,7 +78,7 @@ test('filtering and facet discovery happen before the 200-session display limit'
   const target=await register(f,actors[0],{machine:'rare-host'});await attribute(f,actors[0],target,'Gemini','Gemini rare model');
   f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run('2026-01-01T00:00:00.000Z',target.id);
   for(let index=0;index<201;index++)await register(f,actors[Math.floor(index/75)]);
-  const unfiltered=await f.call(actors[0].token,'/api/sessions');
+  const unfiltered=await f.call(OWNER,'/api/sessions?project=shared');
   assert.equal(unfiltered.body.sessions.length,200);assert.equal(unfiltered.body.total,202);
   assert.equal(unfiltered.body.sessions.some(session=>session.id===target.id),false);
   assert.ok(unfiltered.body.filterOptions.agentNames.includes('Gemini'));

@@ -217,6 +217,8 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 .message-route { margin: 9px 0 5px; color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
 .message-body-text { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 11px; line-height: 1.6; }
 .message-warning { margin: 9px 0 0; color: var(--subtle); font-size: 9px; line-height: 1.4; }
+.message-review-state { margin: 8px 0 0; color: var(--warning); font-size: 10px; line-height: 1.4; }
+#review-filter-wrap { margin-bottom: 12px; }
 .message-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 11px; }
 .acknowledged-label { color: var(--success); font-size: 9px; font-weight: 750; }
 .load-older { width: 100%; margin-top: 8px; }

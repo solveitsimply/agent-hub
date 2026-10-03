@@ -1,7 +1,7 @@
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync,readdirSync} from 'node:fs';
 export class SqliteD1 {
-  constructor(path=':memory:'){this.database=new DatabaseSync(path);const root=new URL('../migrations/',import.meta.url);for(const file of readdirSync(root).filter(name=>/^\d+.*\.sql$/u.test(name)).sort())this.database.exec(readFileSync(new URL(file,root),'utf8'));}
+  constructor(path=':memory:',{throughMigration=null}={}){this.database=new DatabaseSync(path);const root=new URL('../migrations/',import.meta.url);for(const file of readdirSync(root).filter(name=>/^\d+.*\.sql$/u.test(name)&&(!throughMigration||name.slice(0,4)<=throughMigration)).sort())this.database.exec(readFileSync(new URL(file,root),'utf8'));}
   withSession(){return this;}
   prepare(query){const db=this.database;let parameters=[];const statement={
     bind(...values){parameters=values;return statement;},

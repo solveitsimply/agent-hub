@@ -124,7 +124,7 @@ export async function readJsonStdin(stdin = process.stdin) {
 }
 
 function usage() {
-  return 'Usage: hub-client.mjs me | sessions [project] | register < JSON | update SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project]';
+  return 'Usage: hub-client.mjs me | sessions [project] | register < JSON | update SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
@@ -187,7 +187,8 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       if (args.length) break;
       return client.request('POST', '/api/ownership/release', { body: await readJsonStdin() });
     case 'ownership':
-      return client.request('GET', '/api/ownership', { query: { project: optionalOne() } });
+      if (args.length > 2) break;
+      return client.request('GET', '/api/ownership', { query: { project: args[0], resourceKey: args[1] } });
     default:
       break;
   }

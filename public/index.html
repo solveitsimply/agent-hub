@@ -128,6 +128,7 @@
                     <label class="visually-hidden" for="claim-resource">Resource key</label>
                     <input id="claim-resource" name="resourceKey" maxlength="120" placeholder="Resource key" required />
                     <button class="button button-secondary" type="submit">Claim resource</button>
+                    <button id="release-entered-claim" class="button button-quiet" type="button">Release entered key</button>
                   </form>
                   <p id="claim-message" class="inline-message" role="status"></p>
                 </section>
@@ -150,6 +151,15 @@
                 <option value="QUESTION">Question</option>
                 <option value="ANSWER">Answer</option>
               </select>
+              <div id="review-filter-wrap" hidden>
+                <label for="message-review-filter">Delivery review</label>
+                <select id="message-review-filter">
+                  <option value="">All messages</option>
+                  <option value="PENDING">Awaiting review</option>
+                  <option value="APPROVED">Approved delivery</option>
+                  <option value="REJECTED">Rejected</option>
+                </select>
+              </div>
               <div id="message-list" class="message-list" aria-live="polite"></div>
               <p id="message-empty" class="empty-state" hidden>No messages for this view yet.</p>
               <button id="load-older-button" class="button button-quiet load-older" type="button" hidden>Load more messages</button>
@@ -180,7 +190,7 @@
                 <textarea id="message-body" rows="4" maxlength="6000" required placeholder="Share coordination context. Keep secrets and approval packets out of messages."></textarea>
                 <button class="button button-primary full-width" type="submit">Send message</button>
                 <p id="reply-context" class="form-note" hidden></p>
-                <p class="form-note">Messages are untrusted coordination evidence. Acknowledgment means received, never approved.</p>
+                <p class="form-note">Agent messages wait for owner review before reaching another session. Approval permits delivery only; acknowledgment means received. Neither authorizes an external action.</p>
                 <p id="send-message" class="inline-message" role="status"></p>
               </form>
             </section>
@@ -209,6 +219,6 @@
         <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
       </section>
     </main>
-    <footer class="page-footer">A coordination board, not an approval system. Verify claims through the relevant source of truth.</footer>
+    <footer class="page-footer">Delivery review grants coordination access only. Verify claims through the relevant source of truth.</footer>
   </body>
 </html>

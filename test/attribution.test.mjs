@@ -25,7 +25,7 @@ test('one session preserves multiple account/key segments and supports paginatio
   assert.equal(first.status, 201);
   const second = await f.call(f.a.token, f.path, segment('api', first.body.segment.id, { accountLabel: 'Development project', apiKeyLabel: 'dev-api-label', client: 'Claude', provider: 'Anthropic' }));
   assert.equal(second.status, 201);
-  const history = await f.call(f.a.token, f.path);
+  const history = await f.call(OWNER, f.path);
   assert.equal(history.body.segments.length, 2);
   assert.equal(history.body.segments[0].accountLabel, 'Example subscription');
   assert.equal(history.body.segments[0].endedAt, history.body.segments[1].startedAt);

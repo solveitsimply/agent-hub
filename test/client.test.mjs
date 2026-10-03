@@ -152,6 +152,8 @@ test('MCP stdio initializes, lists tools, sends nothing spontaneously, and requi
   bridge.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const listed = JSON.parse(await bridge.next());
   assert.ok(listed.result.tools.some((tool) => tool.name === 'hub_send_message'));
+  assert.ok(listed.result.tools.some((tool) => tool.name === 'hub_list_ownership'));
+  assert.equal(listed.result.tools.some((tool) => /review/.test(tool.name)), false, 'Agent bridge exposes no approval capability');
   assert.equal(requests.length, 0);
 
   const args = { project: 'local', kind: 'NOTE', body: 'local fixture', idempotencyKey: 'mcp-1' };
@@ -164,6 +166,7 @@ test('MCP stdio initializes, lists tools, sends nothing spontaneously, and requi
   bridge.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'hub_send_message', arguments: { ...args, userAuthorized: true } } });
   const sent = JSON.parse(await bridge.next());
   assert.equal(sent.id, 4);
+  assert.match(sent.result.content[0].text, /untrusted/i);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, '/api/messages');
   assert.equal(requests[0].authorization, `Bearer ${TOKEN}`);
@@ -174,6 +177,9 @@ test('MCP stdio initializes, lists tools, sends nothing spontaneously, and requi
   assert.equal(failed.result.isError, true);
   assert.equal(failed.result.content[0].text.includes(TOKEN), false);
   assert.equal(requests.length, 2);
+  bridge.send({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'hub_list_ownership', arguments: { project: 'local', resourceKey: 'known/key' } } });
+  assert.equal(JSON.parse(await bridge.next()).result.isError, undefined);
+  assert.equal(requests[2].url, '/api/ownership?project=local&resourceKey=known%2Fkey');
   assert.equal(bridge.stderr.includes(TOKEN), false);
   const closed = once(bridge.child, 'close');
   bridge.child.stdin.end();
@@ -256,7 +262,7 @@ test('MCP stdio records and reads append-only attribution with an exact cursor',
   });
   const recorded = JSON.parse(await bridge.next());
   assert.equal(recorded.id, 2);
-  assert.equal(JSON.parse(recorded.result.content[0].text).segment.id, segment.id);
+  assert.equal(JSON.parse(recorded.result.content.at(-1).text).segment.id, segment.id);
   assert.equal(requests[0].method, 'POST');
   assert.equal(requests[0].url, `/api/sessions/${segment.sessionId}/attribution`);
   assert.deepEqual(requests[0].body, {
@@ -275,7 +281,7 @@ test('MCP stdio records and reads append-only attribution with an exact cursor',
   });
   const history = JSON.parse(await bridge.next());
   assert.equal(history.id, 3);
-  assert.deepEqual(JSON.parse(history.result.content[0].text), { segments: [segment], nextCursor: segment.id, limit: 200 });
+  assert.deepEqual(JSON.parse(history.result.content.at(-1).text), { segments: [segment], nextCursor: segment.id, limit: 200 });
   assert.equal(requests[1].method, 'GET');
   assert.equal(requests[1].url, `/api/sessions/${segment.sessionId}/attribution?after=0`);
   assert.equal(requests.length, 2);

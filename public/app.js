@@ -25,6 +25,7 @@
     messageCursor: 0,
     messageViewSessionId: null,
     messageViewKind: null,
+    messageViewReviewState: null,
     messageGeneration: 0,
     messageLoading: false,
     hasMoreMessages: false,
@@ -48,8 +49,9 @@
     projectFilter: $('project-filter'), agentNameFilter: $('agent-name-filter'), agentModelFilter: $('agent-model-filter'),
     environmentFilter: $('environment-filter'), statusFilter: $('status-filter'), staleFilter: $('stale-filter'), sessionCount: $('session-count'),
     detail: $('session-detail'), detailTitle: $('detail-title'), detailStatus: $('detail-status'), detailContent: $('detail-content'),
-    releaseDetails: $('release-details'), claims: $('claims-list'), claimForm: $('claim-form'), claimResource: $('claim-resource'), claimMessage: $('claim-message'), archiveSession: $('archive-session-button'),
+    releaseDetails: $('release-details'), claims: $('claims-list'), claimForm: $('claim-form'), claimResource: $('claim-resource'), releaseEnteredClaim: $('release-entered-claim'), claimMessage: $('claim-message'), archiveSession: $('archive-session-button'),
     messageFilter: $('message-type-filter'), messageScope: $('message-scope'), messageList: $('message-list'), messageEmpty: $('message-empty'), messageCount: $('message-count'),
+    reviewFilter: $('message-review-filter'), reviewFilterWrap: $('review-filter-wrap'),
     loadOlder: $('load-older-button'), messageForm: $('message-form'), messageProject: $('message-project'), manualProjectWrap: $('manual-project-wrap'), manualProject: $('manual-project'),
     fromSessionWrap: $('from-session-wrap'), fromSession: $('from-session'), toSession: $('to-session'), messageKind: $('message-kind'),
     messageBody: $('message-body'), sendMessage: $('send-message'), composeAs: $('compose-as'), replyContext: $('reply-context'),
@@ -436,9 +438,9 @@
     for (const claim of projectClaims) {
       const item = node('article', 'claim-item');
       const copy = node('div', 'claim-copy');
-      copy.append(node('strong', '', claim.resourceKey), node('span', 'muted small', `${claim.ownerLabel || claim.ownerSessionId} · claimed ${formatTime(claim.claimedAt)}`));
+      copy.append(node('strong', '', claim.resourceKey || 'Claim key withheld; enter your known key to release'), node('span', 'muted small', `${claim.ownerLabel || claim.ownerSessionId} · claimed ${formatTime(claim.claimedAt)}`));
       item.append(copy);
-      if (canManage && claim.ownerSessionId === session.id) {
+      if (canManage && claim.ownerSessionId === session.id && claim.resourceKey) {
         const release = node('button', 'button button-quiet button-small', 'Release');
         release.type = 'button';
         release.addEventListener('click', () => releaseClaim(session, claim.resourceKey));
@@ -451,7 +453,7 @@
   function canAcknowledge(message) {
     if (message.acknowledgedAt) return false;
     if (isOwner()) return message.toSessionId == null && message.kind === 'QUESTION' && message.fromSessionId != null;
-    return Boolean(message.toSessionId && message.toPrincipalId === state.principal?.id);
+    return Boolean(message.reviewState === 'APPROVED' && message.toSessionId && message.toPrincipalId === state.principal?.id);
   }
 
   function canAnswerAsOwner(message) {
@@ -460,7 +462,7 @@
 
   function renderMessages() {
     clear(el.messageList);
-    const messages = [...state.messages].sort((a, b) => a.id - b.id);
+    const messages = [...state.messages].sort((a, b) => (isOwner() ? a.id - b.id : a.deliveryCursor - b.deliveryCursor));
     const session = selectedSession();
     el.messageScope.textContent = session
       ? `Session: ${session.label || session.task || session.id}`
@@ -477,10 +479,20 @@
       const sender = message.fromPrincipalName || (message.fromSessionId ? 'Agent session' : 'Owner');
       const recipient = message.toPrincipalName || (message.toSessionId ? 'Targeted session' : 'Owner inbox');
       card.append(top, node('p', 'message-route', `${sender} → ${recipient} · ${message.project}`));
+      card.append(node('p', 'message-route', `From session: ${message.fromSessionId || 'Human owner'} · To session: ${message.toSessionId || 'Human owner inbox'}`));
       card.append(node('p', 'message-body-text', message.body));
       card.append(node('p', 'message-warning', 'Untrusted coordination evidence · acknowledgment is not approval'));
+      card.append(node('p', 'message-review-state', message.toSessionId ? `Delivery: ${message.reviewState || 'Unknown'}` : 'Question for the human owner only'));
       if (message.replyTo != null) card.append(node('span', 'muted small', `Reply to message ${message.replyTo}`));
       const actions = node('div', 'message-actions');
+      if (isOwner() && message.toSessionId && message.reviewState === 'PENDING') {
+        for (const [decision, label, style] of [['APPROVED', 'Approve delivery', 'button-secondary'], ['REJECTED', 'Reject', 'button-danger']]) {
+          const review = node('button', `button ${style} button-small`, label);
+          review.type = 'button';
+          review.addEventListener('click', () => reviewMessage(message, decision, review));
+          actions.append(review);
+        }
+      }
       if (canAcknowledge(message)) {
         const acknowledge = node('button', 'button button-secondary button-small', 'Acknowledge receipt');
         acknowledge.type = 'button';
@@ -507,41 +519,61 @@
     state.messageBefore = null;
     state.messageViewSessionId = null;
     state.messageViewKind = null;
+    state.messageViewReviewState = null;
     state.hasMoreMessages = false;
     state.messageLoading = false;
   }
 
-  async function refreshMessages({ reset = false, older = false } = {}) {
+  async function refreshMessages({ reset = false, older = false, reconcile = false } = {}) {
     if (!state.principal) return;
     const sessionId = state.selectedSessionId;
     const kind = el.messageFilter.value;
-    const resetView = reset || state.messageViewSessionId !== sessionId || state.messageViewKind !== kind;
+    const reviewState = isOwner() ? el.reviewFilter.value : '';
+    const resetView = reset || state.messageViewSessionId !== sessionId || state.messageViewKind !== kind || state.messageViewReviewState !== reviewState;
+    const reconcileView = !resetView && !older && reconcile && isOwner() && state.messages.length > 0;
     if (!resetView && state.messageLoading) return;
     if (older && !resetView && !state.hasMoreMessages) return;
     const generation = state.generation;
     const requestId = ++state.messageGeneration;
     const isCurrent = () => generation === state.generation && requestId === state.messageGeneration &&
-      sessionId === state.selectedSessionId && kind === el.messageFilter.value;
+      sessionId === state.selectedSessionId && kind === el.messageFilter.value && reviewState === (isOwner() ? el.reviewFilter.value : '');
     const query = resetView
       ? new URLSearchParams({ latest: '1' })
       : older
         ? new URLSearchParams({ before: String(state.messageBefore) })
-        : new URLSearchParams({ after: String(state.messageCursor) });
+        : new URLSearchParams({ after: String(reconcileView ? Math.min(...state.messages.map((message) => message.id)) - 1 : state.messageCursor) });
     if (sessionId) query.set('sessionId', sessionId);
     if (kind) query.set('kind', kind);
+    if (reviewState) query.set('reviewState', reviewState);
     state.messageLoading = true;
     renderMessages();
     try {
       const payload = await request(`/messages?${query.toString()}`);
       if (!isCurrent()) return;
       const incoming = payload.messages || [];
+      let nextCursor = payload.nextCursor;
+      if (reconcileView) {
+        let page = incoming;
+        while (page.length === 100) {
+          query.set('after', String(nextCursor));
+          const next = await request(`/messages?${query.toString()}`);
+          if (!isCurrent()) return;
+          page = next.messages || [];
+          incoming.push(...page);
+          nextCursor = next.nextCursor;
+        }
+      }
       if (resetView) {
         state.messages = incoming;
-        state.messageCursor = incoming.reduce((cursor, message) => Math.max(cursor, Number(message.id) || 0), 0);
+        state.messageCursor = payload.nextCursor ?? 0;
         state.messageBefore = payload.nextBefore ?? null;
         state.hasMoreMessages = state.messageBefore !== null;
         state.messageViewSessionId = sessionId;
         state.messageViewKind = kind;
+        state.messageViewReviewState = reviewState;
+      } else if (reconcileView) {
+        state.messages = incoming;
+        state.messageCursor = Math.max(state.messageCursor, nextCursor ?? state.messageCursor);
       } else if (older) {
         const known = new Set(state.messages.map((message) => message.id));
         state.messages.unshift(...incoming.filter((message) => !known.has(message.id)));
@@ -550,7 +582,7 @@
       } else {
         const known = new Set(state.messages.map((message) => message.id));
         state.messages.push(...incoming.filter((message) => !known.has(message.id)));
-        state.messageCursor = Math.max(state.messageCursor, ...incoming.map((message) => Number(message.id) || 0));
+        state.messageCursor = Math.max(state.messageCursor, payload.nextCursor ?? state.messageCursor);
       }
     } catch (error) {
       if (isCurrent()) throw error;
@@ -605,6 +637,8 @@
       ? `Workspace owner · ${projectSummary}`
       : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: Agent · ${projectSummary}`;
     el.ownerTools.hidden = !isOwner();
+    el.reviewFilterWrap.hidden = !isOwner();
+    for (const select of [el.agentNameFilter, el.agentModelFilter]) select.disabled = !isOwner();
     renderSelectors();
     renderSummary();
     renderSessions();
@@ -653,7 +687,7 @@
       renderAll();
       await Promise.all([
         refreshOwnership(),
-        refreshMessages(),
+        refreshMessages({ reconcile: isOwner() }),
         ...(quiet ? [] : [loadAttribution(selectedSession()?.id, { reset: true })]),
       ]);
       if (!quiet) toast('Board refreshed.');
@@ -715,6 +749,21 @@
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) toast(error.message, 'error'); }
   }
 
+  async function reviewMessage(message, decision, button) {
+    if (!isOwner() || message.reviewState !== 'PENDING') return;
+    const generation = state.generation;
+    button.disabled = true;
+    try {
+      const payload = await request(`/messages/${encodeURIComponent(message.id)}/review`, { method: 'POST', body: JSON.stringify({ decision, payloadHash: message.payloadHash }) });
+      if (generation !== state.generation) return;
+      state.messages = state.messages.map((item) => item.id === message.id ? payload.message : item);
+      renderMessages();
+      toast(decision === 'APPROVED' ? 'Delivery approved for this exact message and recipient. External actions still require their own authorization.' : 'Message rejected; its body stays out of agent inboxes.');
+      await refreshMessages({ reconcile: true });
+    } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) toast(error.message, 'error'); }
+    finally { button.disabled = false; }
+  }
+
   async function releaseClaim(session, resourceKey) {
     if (!ownsSession(session)) return;
     if (!window.confirm(`Release your claim on “${resourceKey}” for ${session.project}?`)) return;
@@ -772,6 +821,8 @@
     state.attribution = { sessionId: '', segments: [], cursor: null, hasMore: false, loading: false, error: '' };
     resetMessageView();
     el.messageFilter.value = '';
+    el.reviewFilter.value = '';
+    el.reviewFilterWrap.hidden = true;
     state.replyTo = null;
     el.connectToken.value = '';
     el.projectFilter.value = '';
@@ -871,6 +922,11 @@
     renderMessages();
     try { await refreshMessages({ reset: true }); } catch (error) { if (!(error instanceof StaleRequestError)) toast(error.message, 'error'); }
   });
+  el.reviewFilter.addEventListener('change', async () => {
+    resetMessageView();
+    renderMessages();
+    try { await refreshMessages({ reset: true }); } catch (error) { if (!(error instanceof StaleRequestError)) toast(error.message, 'error'); }
+  });
   el.messageProject.addEventListener('change', () => {
     el.manualProjectWrap.hidden = !isOwner() || el.messageProject.value !== '__manual__';
     if (!el.manualProjectWrap.hidden) el.manualProject.focus();
@@ -898,6 +954,12 @@
       setText(el.claimMessage, 'Claim recorded for this session.');
       await refreshOwnership();
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) setText(el.claimMessage, error.message); }
+  });
+
+  el.releaseEnteredClaim.addEventListener('click', async () => {
+    const session = selectedSession();
+    const resourceKey = el.claimResource.value.trim();
+    if (ownsSession(session) && resourceKey) await releaseClaim(session, resourceKey);
   });
 
   el.messageForm.addEventListener('submit', async (event) => {
@@ -932,10 +994,10 @@
     };
     const generation = state.generation;
     try {
-      await request('/messages', { method: 'POST', body: JSON.stringify(payload) });
+      const result = await request('/messages', { method: 'POST', body: JSON.stringify(payload) });
       if (generation !== state.generation) return;
       el.messageBody.value = '';
-      setText(el.sendMessage, 'Message sent to the selected recipient.');
+      setText(el.sendMessage, result.message.reviewState === 'PENDING' && toSessionId ? 'Message queued for owner review. The recipient cannot read it yet.' : toSessionId ? 'Message delivered to the selected recipient.' : 'Question submitted to the human owner inbox.');
       clearReply();
       await refreshMessages({ reset: true });
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) setText(el.sendMessage, error.message); }

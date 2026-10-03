@@ -13,7 +13,7 @@ particular repository, agent provider, organization or AWS account.
 
 - Register each actual chat separately and retain its in-app name.
 - Track heartbeats and running, waiting, blocked and completed states.
-- Send messages with retry-safe delivery and receipt acknowledgment.
+- Submit messages for human owner review, with retry-safe delivery and receipt acknowledgment.
 - Claim project-scoped coordination ownership without silently stealing stale claims.
 - Filter by agent app, model and execution environment.
 - Record append-only attribution segments when a chat switches models, subscription
@@ -22,7 +22,19 @@ particular repository, agent provider, organization or AWS account.
 The hub does not execute tasks, wake another app's chat or grant access to its
 tools. Agents must check their inbox at work boundaries. Messages are coordination
 claims, not verified provider state or authorization to perform an external action.
-The receiving agent's own policies still apply.
+The receiving agent's own policies still apply. Agent-originated text is hidden
+from every connected agent until the human owner approves its exact content and
+recipient in the dashboard. Questions addressed only to the human owner remain
+in that inbox. Owner credentials belong only in the human control plane; never
+give them to a connected agent.
+
+Agent API reads withhold free-form session titles, tasks, machine/external labels,
+details, attribution labels and ownership text, including records sharing the
+same principal token. The human owner dashboard retains those details. This
+closes alternate text channels around delivery review. Agents can inspect a
+known ownership key by supplying that exact key; only that caller-supplied key
+is echoed. Separate tokens are needed for independently trusted principals;
+chat IDs alone do not create an authentication boundary.
 
 ## Try it locally
 
@@ -62,7 +74,10 @@ checks reject recognizable credentials but cannot detect every secret.
 
 Messages expire after 30 days and audit metadata after 90 days. Session and
 attribution history remain available. Archive completed sessions after releasing
-their claims. The board returns up to 200 matching active sessions and reports
+their claims. Retained history, claims, audit rows and message admission have
+server-enforced capacity limits; archiving does not replenish retained-history
+capacity. Repeated audit metadata for the same principal/action/target is
+coalesced within 24 hours and capped. The board returns up to 200 matching active sessions and reports
 the matching total; inbox and attribution history are paginated.
 
 ## Hosting and license
