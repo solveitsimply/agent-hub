@@ -1,0 +1,41 @@
+// Provider-native verification only against a synthetic localhost fixture.
+import assert from 'node:assert/strict';
+import {readFile,writeFile,mkdir} from 'node:fs/promises';
+const origin='http://127.0.0.1:8787';
+const owner=(await readFile(new URL('../.dev.vars',import.meta.url),'utf8')).match(/^OWNER_TOKEN="([^"\n]+)"$/m)?.[1];
+assert.ok(owner,'Provide an ignored synthetic .dev.vars fixture');
+async function call(token,path,body,method=body===undefined?'GET':'POST'){
+ const response=await fetch(origin+path,{method,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)}),redirect:'error'});
+ return {status:response.status,body:await response.json()};
+}
+assert.equal((await call(null,'/health')).status,200);
+assert.equal((await call(null,'/api/sessions')).status,401);
+const timestamp=new Date().toISOString();
+const a=await call(owner,'/api/principals',{name:'Local release fixture',account:'local-fixture@example.test',projects:['sample-project-fixture']});
+const b=await call(owner,'/api/principals',{name:'Remote correction fixture',account:'remote-fixture@example.test',projects:['sample-project-fixture']});
+assert.equal(a.status,201);assert.equal(b.status,201);
+async function register(actor,machine,label,status){
+ const result=await call(actor.body.token,'/api/sessions',{externalId:crypto.randomUUID(),machine,label,project:'sample-project-fixture',task:'Verify correction handoff across machines; synthetic data only',status,details:{selectedCommit:'1111111111111111111111111111111111111111',nativeBuildStatus:'Synthetic fixture: migration failed before deployment',migrationState:'Synthetic fixture: awaiting reviewed correction',recoveryBoundary:'Keep the correction owner and existing deployment intact',evidence:[{kind:'fixture',value:'Local workerd + D1 only',observedAt:timestamp,scope:'No customer or provider mutation'}]}});
+ assert.equal(result.status,201);return result.body.session;
+}
+const x=await register(a,'mac-local-fixture','Release custody fixture','WAITING_ON_AGENT');
+const y=await register(b,'other-computer-fixture','Schema correction fixture','RUNNING');
+assert.equal((await call(a.body.token,'/api/ownership/claim',{sessionId:x.id,resourceKey:'release/fixture/'+x.id})).status,200);
+assert.equal((await call(b.body.token,'/api/ownership/claim',{sessionId:y.id,resourceKey:'schema/correction-fixture/'+y.id})).status,200);
+assert.equal((await call(a.body.token,'/api/ownership/claim',{sessionId:x.id,resourceKey:'schema/correction-fixture/'+y.id})).status,409);
+const payload={fromSessionId:x.id,toSessionId:y.id,project:'sample-project-fixture',kind:'HANDOFF',body:'Synthetic handoff: correction ownership stays with the other computer. Share the reviewed commit and recovery evidence before admission.',idempotencyKey:crypto.randomUUID()};
+const sent=await call(a.body.token,'/api/messages',payload);assert.equal(sent.status,201);
+assert.equal((await call(a.body.token,'/api/messages',payload)).body.message.id,sent.body.message.id);
+const inbox=await call(b.body.token,'/api/messages?sessionId='+y.id);assert.equal(inbox.body.messages.at(-1).id,sent.body.message.id);
+assert.equal((await call(a.body.token,'/api/messages/'+sent.body.message.id+'/ack',{sessionId:y.id})).status,403);
+const ack=await call(b.body.token,'/api/messages/'+sent.body.message.id+'/ack',{sessionId:y.id});assert.equal(ack.status,200);assert.ok(ack.body.message.acknowledgedAt);
+assert.equal((await call(a.body.token,'/api/sessions/'+y.id,{status:'DONE'},'PATCH')).status,403);
+assert.equal((await call(b.body.token,'/api/sessions/'+y.id+'/heartbeat',{})).body.session.status,'RUNNING');
+const reported=await call(a.body.token,'/api/sessions/'+x.id+'/attribution',{provider:'Example provider',client:'Example agent',model:'Example model',previousSegmentId:null,idempotencyKey:'native-segment-'+x.id});assert.equal(reported.status,201);
+const renamed=await call(a.body.token,'/api/sessions/'+x.id,{label:'Exact native fixture chat title'},'PATCH');assert.equal(renamed.status,200);assert.equal(renamed.body.session.id,x.id);assert.equal(renamed.body.session.externalId,x.externalId);assert.equal(renamed.body.session.label,'Exact native fixture chat title');assert.equal(renamed.body.session.task,x.task);
+const filtered=await call(a.body.token,'/api/sessions?project=sample-project-fixture&agentName=Example%20agent&agentModel=Example%20model&machine=mac-local-fixture');assert.equal(filtered.status,200);assert.equal(filtered.body.sessions.some(item=>item.id===x.id),true);assert.equal(filtered.body.sessions.some(item=>item.id===y.id),false);assert.ok(filtered.body.filterOptions.agentNames.includes(null));assert.ok(filtered.body.total>=1);
+const unknown=await call(a.body.token,'/api/sessions?project=sample-project-fixture&agentNameUnknown=1');assert.equal(unknown.status,200);assert.equal(unknown.body.sessions.some(item=>item.id===x.id),false);assert.equal(unknown.body.sessions.some(item=>item.id===y.id),true);
+const receipt={observedAt:timestamp,runtime:'Cloudflare workerd + local D1',scope:'Synthetic localhost only',checks:['authentication','cross-principal handoff','idempotency','recipient acknowledgment','spoofing refusal','custody conflict refusal','heartbeat','same-session rename','latest attribution filters','unknown facets'],sessions:[x.id,y.id],messageId:sent.body.message.id};
+await mkdir(new URL('../.evidence/',import.meta.url),{recursive:true});
+await writeFile(new URL('../.evidence/native-worker.json',import.meta.url),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});
+console.log(JSON.stringify(receipt,null,2));

@@ -1,0 +1,10 @@
+{
+  "name": "agent-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted coordination across agent sessions, machines and accounts",
+  "license": "MIT",
+  "engines": {"node": ">=22.21.1"},
+  "scripts": {"test": "node --test test/*.test.mjs", "dev": "node scripts/local-server.mjs"}
+}

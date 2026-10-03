@@ -1,0 +1,14 @@
+import {createServer} from 'node:http';
+import {readFile} from 'node:fs/promises';
+import {resolve,extname,sep} from 'node:path';
+import {SqliteD1} from '../test/d1-sqlite.mjs';
+import worker from '../src/worker.mjs';
+const port=Number(process.env.PORT??8787);const root=resolve(new URL('../public/',import.meta.url).pathname);
+const owner=process.env.OWNER_TOKEN;
+if(!owner||owner.length<32)throw new Error('Set a private OWNER_TOKEN of at least32characters for this local fixture; never use a production token.');
+const DB=new SqliteD1();
+const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.json':'application/json'};
+const ASSETS={async fetch(request){const url=new URL(request.url);let path;try{path=decodeURIComponent(url.pathname);}catch{return new Response('Bad path',{status:400});}const file=resolve(root,'.'+(path==='/'?'/index.html':path));if(!file.startsWith(root+sep))return new Response('Not found',{status:404});try{return new Response(await readFile(file),{headers:{'Content-Type':types[extname(file)]??'application/octet-stream','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",'X-Content-Type-Options':'nosniff'}});}catch{return new Response('Not found',{status:404});}}};
+const server=createServer(async(req,res)=>{try{const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>17000){res.writeHead(413);res.end('Body too large');return;}chunks.push(chunk);}const request=new Request('http://127.0.0.1:'+port+req.url,{method:req.method,headers:req.headers,...(['GET','HEAD'].includes(req.method)?{}:{body:Buffer.concat(chunks)})});const result=await worker.fetch(request,{DB,ASSETS,OWNER_TOKEN:owner});res.writeHead(result.status,Object.fromEntries(result.headers));res.end(Buffer.from(await result.arrayBuffer()));}catch{res.writeHead(500);res.end('Local fixture error');}});
+server.listen(port,'127.0.0.1',()=>console.log('Local synthetic fixture at http://127.0.0.1:'+port+' (in-memorySQLite; no provider/customer connections).'));
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>server.close(()=>{DB.close();process.exit(0);}));
