@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
 import worker from '../src/worker.mjs';
 import {SqliteD1} from './d1-sqlite.mjs';
 
@@ -194,4 +194,18 @@ test('hosted HTTP API rejects bearer traffic and HTTPS responses advertise HSTS'
   assert.equal(secure.status,200);assert.equal(secure.headers.get('strict-transport-security'),'max-age=31536000');
   const local=await worker.fetch(new Request('http://127.0.0.1/api/me',{headers:{authorization:'Bearer '+OWNER}}),f.env);
   assert.equal(local.status,200);
+});
+
+test('upgrade reserves cursors for legacy messages already removed by retention',async t=>{
+  const DB=new SqliteD1(':memory:',{throughMigration:'0002'});t.after(()=>DB.close());
+  DB.database.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,created_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('session','owner','external','synthetic','fixture','shared','fixture','RUNNING','2020-01-01','2020-01-01');
+  const insert=DB.database.prepare("INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,project,kind,body,idempotency_key,payload_hash,created_at) VALUES (?,?,'session',?,?,?,?,?,?)");
+  for(let i=0;i<5;i++)insert.run('owner','owner','shared','QUESTION','Expired synthetic history','expired-'+i,'fixture','2020-01-01');
+  const legacyCursor=DB.database.prepare('SELECT MAX(id) AS id FROM messages').get().id;
+  DB.database.exec('DELETE FROM messages');
+  for(const file of readdirSync(new URL('../migrations/',import.meta.url)).filter(name=>name>='0003').sort())DB.database.exec(readFileSync(new URL('../migrations/'+file,import.meta.url),'utf8'));
+  insert.run('owner','owner','shared','QUESTION','Future synthetic delivery','future','fixture','2026-10-03');
+  const id=DB.database.prepare('SELECT MAX(id) AS id FROM messages').get().id;
+  DB.database.prepare('INSERT INTO message_deliveries(message_id) VALUES (?)').run(id);
+  assert.ok(DB.database.prepare('SELECT id FROM message_deliveries WHERE message_id=?').get(id).id>legacyCursor);
 });
