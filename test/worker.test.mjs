@@ -143,3 +143,50 @@ test('human inbox starts at recent custody and older pages do not hide new arriv
  const all=await f.call(a.token,'/api/messages?sessionId='+x.id+'&after=0');assert.equal(all.body.messages[0].body,'Question 0');assert.equal(all.body.messages.length,100);
  const newer=await f.call(a.token,'/api/messages?sessionId='+x.id+'&after='+all.body.nextCursor);assert.equal(newer.body.messages.length,5);
 });
+
+test('all-session and peer-session inbox views preserve principal and project custody',async t=>{
+ const f=fixture(t),a=await invite(f,'a'),b=await invite(f,'b'),c=await invite(f,'c');
+ const x=await session(f,a.token),x2=await session(f,a.token,'second'),y=await session(f,b.token),z=await session(f,c.token);
+ async function send(actor,from,to,kind='NOTE'){
+  const result=await f.call(actor.token,'/api/messages',{fromSessionId:from.id,toSessionId:to.id,project:'release-wave',kind,body:'Synthetic coordination',idempotencyKey:crypto.randomUUID()});
+  assert.equal(result.status,201);return result.body.message;
+ }
+ const outgoing=await send(a,x,y),incoming=await send(b,y,x2,'HANDOFF'),privateMessage=await send(b,y,z);
+ const all=await f.call(a.token,'/api/messages?latest=1');
+ assert.equal(all.status,200);assert.deepEqual(all.body.messages.map(m=>m.id),[outgoing.id,incoming.id]);
+ const peer=await f.call(a.token,'/api/messages?sessionId='+y.id);
+ assert.equal(peer.status,200);assert.deepEqual(peer.body.messages.map(m=>m.id),[outgoing.id,incoming.id]);
+ assert.deepEqual((await f.call(a.token,'/api/messages?sessionId='+z.id)).body.messages,[]);
+ assert.deepEqual((await f.call(a.token,'/api/messages?kind=HANDOFF')).body.messages.map(m=>m.id),[incoming.id]);
+ assert.deepEqual((await f.call(OWNER,'/api/messages')).body.messages.map(m=>m.id),[outgoing.id,incoming.id,privateMessage.id]);
+ // Filtering a peer inbox never lets the viewing principal acknowledge that peer's receipt.
+ assert.equal((await f.call(a.token,'/api/messages/'+outgoing.id+'/ack',{sessionId:y.id})).status,403);
+ assert.equal((await f.call(a.token,'/api/messages/'+incoming.id+'/ack',{sessionId:x.id})).status,403);
+ assert.equal((await f.call(a.token,'/api/messages/'+incoming.id+'/ack',{sessionId:x2.id})).status,200);
+ const outsider=await invite(f,'outsider',['private-work']);
+ const hidden=await session(f,outsider.token,'private',{project:'private-work'});
+ await f.call(outsider.token,'/api/messages',{fromSessionId:hidden.id,project:'private-work',kind:'QUESTION',body:'Private question',idempotencyKey:'private'});
+ assert.equal((await f.call(a.token,'/api/messages?sessionId='+hidden.id+'&kind=QUESTION')).status,403);
+ assert.deepEqual((await f.call(a.token,'/api/messages?kind=QUESTION')).body.messages,[]);
+});
+
+test('message types filter before pagination and combine with session and arrival cursors',async t=>{
+ const f=fixture(t),a=await invite(f,'type-filter'),x=await session(f,a.token),y=await session(f,a.token,'second');
+ for(let i=0;i<105;i++){
+  await f.call(a.token,'/api/messages',{fromSessionId:x.id,toSessionId:y.id,project:'release-wave',kind:'NOTE',body:'Note '+i,idempotencyKey:'note-'+i});
+  await f.call(a.token,'/api/messages',{fromSessionId:x.id,project:'release-wave',kind:'QUESTION',body:'Question '+i,idempotencyKey:'question-'+i});
+ }
+ const latest=await f.call(OWNER,'/api/messages?latest=1&kind=NOTE&sessionId='+y.id);
+ assert.equal(latest.status,200);assert.equal(latest.body.messages.length,100);
+ assert.equal(latest.body.messages[0].body,'Note 5');assert.equal(latest.body.messages.at(-1).body,'Note 104');
+ assert.ok(latest.body.messages.every(m=>m.kind==='NOTE'&&m.toSessionId===y.id));
+ const older=await f.call(a.token,'/api/messages?kind=NOTE&sessionId='+y.id+'&before='+latest.body.nextBefore);
+ assert.equal(older.body.messages.length,5);assert.equal(older.body.messages[0].body,'Note 0');assert.equal(older.body.nextBefore,null);
+ const next=await f.call(a.token,'/api/messages',{fromSessionId:x.id,toSessionId:y.id,project:'release-wave',kind:'NOTE',body:'New note',idempotencyKey:'next-note'});
+ const arrivals=await f.call(a.token,'/api/messages?kind=NOTE&after='+latest.body.nextCursor);
+ assert.deepEqual(arrivals.body.messages.map(m=>m.id),[next.body.message.id]);
+ assert.deepEqual((await f.call(OWNER,'/api/messages?kind=QUESTION&sessionId='+y.id)).body.messages,[]);
+ for(const kind of ['invalid','',"NOTE' OR 1=1 --"]){
+  assert.equal((await f.call(OWNER,'/api/messages?kind='+encodeURIComponent(kind))).status,422);
+ }
+});

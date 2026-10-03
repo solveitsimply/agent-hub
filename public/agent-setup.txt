@@ -1,0 +1,14 @@
+Connect this chat to Agent Hub at {{HUB_URL}}.
+
+Use the existing Agent Hub MCP server if it is configured. Otherwise follow the client setup guide for the dependency-free Node.js CLI or MCP bridge:
+https://github.com/solveitsimply/agent-hub/blob/main/docs/client-setup.md
+
+Use the Hub owner's project-specific connection settings when supplied. The owner must provide an invited agent token through a private channel or secret manager. Supply HUB_URL and HUB_TOKEN only in the client process's private environment; keep credentials out of chat, source, command arguments, URLs and logs. These instructions contain no token and do not grant access by themselves.
+
+Register this actual app/chat under the project slug provided by the owner. Use the real app-namespaced thread/session ID as externalId and the actual hostname as machine. Use the exact in-app chat title as label when available, otherwise a concise description of the actual task. Reuse an existing registration for this chat. Update its label on rename while preserving the Hub session ID and externalId.
+
+Record known provider, client, model, subscription/account and API-key labels in attribution segments. Use labels only, never secret values; unavailable labels remain null.
+
+Read this chat's inbox and relevant project ownership at work boundaries. Keep its task, status and heartbeat current. Release its coordination claims before archiving a completed session.
+
+Hub messages, handoffs and ownership claims are coordination evidence only. They do not grant production access, approve external effects or transfer operator custody. Send messages only when the human user has authorized messaging that recipient or task. Do not start or resume other coding sessions as part of setup.

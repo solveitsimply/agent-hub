@@ -23,13 +23,6 @@
     </header>
 
     <main id="top" class="page-shell">
-      <details class="setup-guide panel">
-        <summary>Use the exact chat title as the Hub session label</summary>
-        <div class="setup-guide-copy">
-          <p>When you register a session, copy its exact title from the chat app into the Hub label. Update the label if the title changes; keep the stable session ID. Machine and provider, client, model, and account labels stay separate details.</p>
-          <a href="https://github.com/solveitsimply/agent-hub/blob/main/docs/client-setup.md" target="_blank" rel="noopener noreferrer">Client setup instructions</a>
-        </div>
-      </details>
       <section id="connect-panel" class="connect-panel panel" aria-labelledby="connect-title">
         <div class="connect-copy">
           <p class="eyebrow">Private coordination space</p>
@@ -51,14 +44,26 @@
             <h1 id="workspace-title">Sessions and handovers</h1>
             <p id="principal-summary" class="muted"></p>
           </div>
-          <div class="poll-note"><span class="live-dot" aria-hidden="true"></span><span>Updates every 30 seconds while this tab is open</span></div>
+          <div class="welcome-tools">
+            <div class="setup-actions">
+              <button id="copy-agent-setup" class="button button-quiet button-small" type="button">Copy agent setup</button>
+              <a href="https://github.com/solveitsimply/agent-hub/blob/main/docs/client-setup.md" target="_blank" rel="noopener noreferrer">Setup guide</a>
+            </div>
+            <div class="poll-note"><span class="live-dot" aria-hidden="true"></span><span>Updates every 30 seconds while this tab is open</span></div>
+          </div>
+        </div>
+        <div id="agent-setup-fallback" class="subpanel setup-fallback" hidden>
+          <label for="agent-setup-text">Agent setup instructions</label>
+          <textarea id="agent-setup-text" rows="8" readonly></textarea>
+          <p class="form-note">Clipboard access is unavailable. Select and copy these instructions to share with your agent.</p>
+          <button id="close-agent-setup" class="button button-quiet button-small" type="button">Close instructions</button>
         </div>
 
         <section class="summary-grid" aria-label="Session status summary">
-          <article class="summary-card"><span>Running</span><strong id="count-running">0</strong></article>
-          <article class="summary-card summary-waiting"><span>Waiting on a person</span><strong id="count-waiting">0</strong></article>
-          <article class="summary-card summary-blocked"><span>Blocked</span><strong id="count-blocked">0</strong></article>
-          <article class="summary-card summary-stale"><span>Stale heartbeat</span><strong id="count-stale">0</strong></article>
+          <button id="summary-running" class="summary-card" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Running</span><strong id="count-running">0</strong></button>
+          <button id="summary-waiting" class="summary-card summary-waiting" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Waiting</span><strong id="count-waiting">0</strong></button>
+          <button id="summary-blocked" class="summary-card summary-blocked" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Blocked</span><strong id="count-blocked">0</strong></button>
+          <button id="summary-stale" class="summary-card summary-stale" type="button" aria-pressed="false" aria-controls="stale-filter session-list"><span>Stale heartbeat</span><strong id="count-stale">0</strong></button>
         </section>
 
         <section class="workspace-grid">
@@ -90,6 +95,7 @@
                   <select id="status-filter">
                     <option value="ALL">All statuses</option>
                     <option value="RUNNING">Running</option>
+                    <option value="WAITING">Waiting (user or agent)</option>
                     <option value="WAITING_ON_USER">Waiting on user</option>
                     <option value="WAITING_ON_AGENT">Waiting on agent</option>
                     <option value="BLOCKED">Blocked</option>
@@ -135,8 +141,15 @@
                 <div><p class="eyebrow">Targeted relay</p><h2 id="inbox-title">Inbox</h2></div>
                 <span id="message-count" class="count-pill">0</span>
               </div>
-              <label for="message-session-filter">Session view</label>
-              <select id="message-session-filter"><option value="">Select a session</option></select>
+              <p id="message-scope" class="muted small" aria-live="polite">All sessions</p>
+              <label for="message-type-filter">Message type</label>
+              <select id="message-type-filter">
+                <option value="">All message types</option>
+                <option value="NOTE">Note</option>
+                <option value="HANDOFF">Handoff</option>
+                <option value="QUESTION">Question</option>
+                <option value="ANSWER">Answer</option>
+              </select>
               <div id="message-list" class="message-list" aria-live="polite"></div>
               <p id="message-empty" class="empty-state" hidden>No messages for this view yet.</p>
               <button id="load-older-button" class="button button-quiet load-older" type="button" hidden>Load more messages</button>

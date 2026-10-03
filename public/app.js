@@ -22,9 +22,11 @@
     selectedSessionId: '',
     attribution: { sessionId: '', segments: [], cursor: null, hasMore: false, loading: false, error: '' },
     attributionGeneration: 0,
-    messageSessionId: '',
     messageCursor: 0,
     messageViewSessionId: null,
+    messageViewKind: null,
+    messageGeneration: 0,
+    messageLoading: false,
     hasMoreMessages: false,
     messageBefore: null,
     replyTo: null,
@@ -41,11 +43,13 @@
     connectPanel: $('connect-panel'), connectForm: $('connect-form'), connectToken: $('hub-token'),
     workspace: $('workspace'), connection: $('connection-state'), refresh: $('refresh-button'), logout: $('logout-button'),
     summary: $('principal-summary'), sessions: $('session-list'), sessionEmpty: $('session-empty'),
+    copyAgentSetup: $('copy-agent-setup'), setupFallback: $('agent-setup-fallback'), setupText: $('agent-setup-text'), closeSetup: $('close-agent-setup'),
+    summaryRunning: $('summary-running'), summaryWaiting: $('summary-waiting'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
     projectFilter: $('project-filter'), agentNameFilter: $('agent-name-filter'), agentModelFilter: $('agent-model-filter'),
     environmentFilter: $('environment-filter'), statusFilter: $('status-filter'), staleFilter: $('stale-filter'), sessionCount: $('session-count'),
     detail: $('session-detail'), detailTitle: $('detail-title'), detailStatus: $('detail-status'), detailContent: $('detail-content'),
     releaseDetails: $('release-details'), claims: $('claims-list'), claimForm: $('claim-form'), claimResource: $('claim-resource'), claimMessage: $('claim-message'), archiveSession: $('archive-session-button'),
-    messageFilter: $('message-session-filter'), messageList: $('message-list'), messageEmpty: $('message-empty'), messageCount: $('message-count'),
+    messageFilter: $('message-type-filter'), messageScope: $('message-scope'), messageList: $('message-list'), messageEmpty: $('message-empty'), messageCount: $('message-count'),
     loadOlder: $('load-older-button'), messageForm: $('message-form'), messageProject: $('message-project'), manualProjectWrap: $('manual-project-wrap'), manualProject: $('manual-project'),
     fromSessionWrap: $('from-session-wrap'), fromSession: $('from-session'), toSession: $('to-session'), messageKind: $('message-kind'),
     messageBody: $('message-body'), sendMessage: $('send-message'), composeAs: $('compose-as'), replyContext: $('reply-context'),
@@ -183,16 +187,7 @@
     renderAttributionFilter(el.environmentFilter, state.sessionFilterOptions.machines, 'All environments');
     el.manualProjectWrap.hidden = !isOwner() || el.messageProject.value !== '__manual__';
 
-    const priorFilter = state.messageSessionId;
-    clear(el.messageFilter);
-    option(el.messageFilter, '', isOwner() ? 'All messages' : 'Select your session');
-    const ownSessions = state.sessions.filter((session) => isOwner() || session.principalId === state.principal?.id);
-    for (const session of ownSessions) option(el.messageFilter, session.id, `${session.label || session.task} · ${session.project}`);
-    if (ownSessions.some((session) => session.id === priorFilter)) el.messageFilter.value = priorFilter;
-    else if (!isOwner() && ownSessions.length === 1) {
-      el.messageFilter.value = ownSessions[0].id;
-      state.messageSessionId = ownSessions[0].id;
-    }
+    const ownSessions = state.sessions.filter((session) => ownsSession(session));
 
     const currentFrom = el.fromSession.value;
     clear(el.fromSession);
@@ -208,7 +203,7 @@
     clear(el.toSession);
     option(el.toSession, '', isOwner() ? 'No session recipient' : 'Owner inbox (question only)');
     for (const session of state.sessions) {
-      if (isOwner() || session.id !== (el.fromSession.value || state.messageSessionId)) {
+      if (isOwner() || session.id !== el.fromSession.value) {
         option(el.toSession, session.id, `${session.label || session.task} · ${session.project} · ${session.principalName}`);
       }
     }
@@ -238,7 +233,8 @@
 
   function sessionMatches(session) {
     return (!visibleProject() || session.project === visibleProject()) &&
-      (el.statusFilter.value === 'ALL' || session.status === el.statusFilter.value) &&
+      (el.statusFilter.value === 'ALL' || session.status === el.statusFilter.value ||
+        (el.statusFilter.value === 'WAITING' && (session.status === 'WAITING_ON_USER' || session.status === 'WAITING_ON_AGENT'))) &&
       (!el.staleFilter.checked || session.stale === true);
   }
 
@@ -267,6 +263,10 @@
   }
 
   function renderSessions() {
+    for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaiting, 'WAITING'], [el.summaryBlocked, 'BLOCKED']]) {
+      chip.setAttribute('aria-pressed', String(el.statusFilter.value === status));
+    }
+    el.summaryStale.setAttribute('aria-pressed', String(el.staleFilter.checked));
     clear(el.sessions);
     const sessions = state.sessions.filter(sessionMatches).sort((a, b) => {
       const statusOrder = { WAITING_ON_USER: 0, WAITING_ON_AGENT: 1, BLOCKED: 2, RUNNING: 3, DONE: 4 };
@@ -448,14 +448,10 @@
     }
   }
 
-  function selectedMessageSession() {
-    return state.sessions.find((session) => session.id === state.messageSessionId) ?? null;
-  }
-
   function canAcknowledge(message) {
     if (message.acknowledgedAt) return false;
     if (isOwner()) return message.toSessionId == null && message.kind === 'QUESTION' && message.fromSessionId != null;
-    return Boolean(state.messageSessionId && message.toSessionId === state.messageSessionId);
+    return Boolean(message.toSessionId && message.toPrincipalId === state.principal?.id);
   }
 
   function canAnswerAsOwner(message) {
@@ -465,7 +461,13 @@
   function renderMessages() {
     clear(el.messageList);
     const messages = [...state.messages].sort((a, b) => a.id - b.id);
+    const session = selectedSession();
+    el.messageScope.textContent = session
+      ? `Session: ${session.label || session.task || session.id}`
+      : isOwner() ? 'All sessions' : 'All sessions · messages sent or received by this account';
     el.messageCount.textContent = String(messages.length);
+    el.messageEmpty.textContent = state.messageLoading ? 'Loading messages…' : 'No messages match this view yet.';
+    el.loadOlder.disabled = state.messageLoading;
     el.messageEmpty.hidden = messages.length !== 0;
     for (const message of messages) {
       const card = node('article', `message-card${message.acknowledgedAt ? ' is-acknowledged' : ''}`);
@@ -498,46 +500,66 @@
     el.loadOlder.hidden = !state.hasMoreMessages;
   }
 
+  function resetMessageView() {
+    state.messageGeneration += 1;
+    state.messages = [];
+    state.messageCursor = 0;
+    state.messageBefore = null;
+    state.messageViewSessionId = null;
+    state.messageViewKind = null;
+    state.hasMoreMessages = false;
+    state.messageLoading = false;
+  }
+
   async function refreshMessages({ reset = false, older = false } = {}) {
     if (!state.principal) return;
-    const sessionId = state.messageSessionId;
-    const resetView = reset || state.messageViewSessionId !== sessionId;
-    if (!isOwner() && !sessionId) {
-      state.messages = [];
-      state.messageCursor = 0;
-      state.messageBefore = null;
-      state.messageViewSessionId = sessionId;
-      state.hasMoreMessages = false;
-      renderMessages();
-      return;
-    }
+    const sessionId = state.selectedSessionId;
+    const kind = el.messageFilter.value;
+    const resetView = reset || state.messageViewSessionId !== sessionId || state.messageViewKind !== kind;
+    if (!resetView && state.messageLoading) return;
+    if (older && !resetView && !state.hasMoreMessages) return;
     const generation = state.generation;
+    const requestId = ++state.messageGeneration;
+    const isCurrent = () => generation === state.generation && requestId === state.messageGeneration &&
+      sessionId === state.selectedSessionId && kind === el.messageFilter.value;
     const query = resetView
       ? new URLSearchParams({ latest: '1' })
       : older
-        ? new URLSearchParams({ before: String(state.messageBefore ?? '') })
+        ? new URLSearchParams({ before: String(state.messageBefore) })
         : new URLSearchParams({ after: String(state.messageCursor) });
     if (sessionId) query.set('sessionId', sessionId);
-    const payload = await request(`/messages?${query.toString()}`);
-    if (generation !== state.generation || sessionId !== state.messageSessionId) return;
-    const incoming = payload.messages || [];
-    if (resetView) {
-      state.messages = incoming;
-      state.messageCursor = incoming.reduce((cursor, message) => Math.max(cursor, Number(message.id) || 0), 0);
-      state.messageBefore = payload.nextBefore ?? null;
-      state.hasMoreMessages = state.messageBefore !== null;
-      state.messageViewSessionId = sessionId;
-    } else if (older) {
-      const known = new Set(state.messages.map((message) => message.id));
-      state.messages.unshift(...incoming.filter((message) => !known.has(message.id)));
-      state.messageBefore = payload.nextBefore;
-      state.hasMoreMessages = state.messageBefore !== null;
-    } else {
-      const known = new Set(state.messages.map((message) => message.id));
-      state.messages.push(...incoming.filter((message) => !known.has(message.id)));
-      state.messageCursor = Math.max(state.messageCursor, ...incoming.map((message) => Number(message.id) || 0));
-    }
+    if (kind) query.set('kind', kind);
+    state.messageLoading = true;
     renderMessages();
+    try {
+      const payload = await request(`/messages?${query.toString()}`);
+      if (!isCurrent()) return;
+      const incoming = payload.messages || [];
+      if (resetView) {
+        state.messages = incoming;
+        state.messageCursor = incoming.reduce((cursor, message) => Math.max(cursor, Number(message.id) || 0), 0);
+        state.messageBefore = payload.nextBefore ?? null;
+        state.hasMoreMessages = state.messageBefore !== null;
+        state.messageViewSessionId = sessionId;
+        state.messageViewKind = kind;
+      } else if (older) {
+        const known = new Set(state.messages.map((message) => message.id));
+        state.messages.unshift(...incoming.filter((message) => !known.has(message.id)));
+        state.messageBefore = payload.nextBefore ?? null;
+        state.hasMoreMessages = state.messageBefore !== null;
+      } else {
+        const known = new Set(state.messages.map((message) => message.id));
+        state.messages.push(...incoming.filter((message) => !known.has(message.id)));
+        state.messageCursor = Math.max(state.messageCursor, ...incoming.map((message) => Number(message.id) || 0));
+      }
+    } catch (error) {
+      if (isCurrent()) throw error;
+    } finally {
+      if (isCurrent()) {
+        state.messageLoading = false;
+        renderMessages();
+      }
+    }
   }
 
   async function refreshOwnership() {
@@ -578,8 +600,10 @@
 
   function renderAll() {
     const projects = state.principal.projects ?? [];
-    const projectSummary = state.principal.role === 'owner' || projects.length === 0 || projects.includes('*') ? 'All projects' : projects.join(', ');
-    el.summary.textContent = `${state.principal.name} · ${state.principal.account} · ${state.principal.role === 'owner' ? 'Owner' : 'Agent'} · ${projectSummary}`;
+    const projectSummary = isOwner() || projects.includes('*') ? 'All projects' : projects.length ? `Projects: ${projects.join(', ')}` : 'No projects';
+    el.summary.textContent = isOwner()
+      ? `Workspace owner · ${projectSummary}`
+      : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: Agent · ${projectSummary}`;
     el.ownerTools.hidden = !isOwner();
     renderSelectors();
     renderSummary();
@@ -616,14 +640,9 @@
       }
       state.sessionTotal = Number.isFinite(sessionPayload.total) ? sessionPayload.total : state.sessions.length;
       state.sessionLimit = Number.isFinite(sessionPayload.limit) && sessionPayload.limit > 0 ? sessionPayload.limit : 200;
-      if (!state.sessions.some((session) => session.id === state.selectedSessionId)) state.selectedSessionId = '';
-      if (state.messageSessionId && !state.sessions.some((session) => session.id === state.messageSessionId)) {
-        state.messageSessionId = '';
-        state.messages = [];
-        state.messageCursor = 0;
-        state.messageBefore = null;
-        state.messageViewSessionId = null;
-        renderMessages();
+      if (state.selectedSessionId && !state.sessions.some((session) => session.id === state.selectedSessionId)) {
+        state.selectedSessionId = '';
+        resetMessageView();
       }
       await refreshPrincipals();
       if (generation !== state.generation) return;
@@ -653,12 +672,15 @@
 
   async function selectSession(sessionId) {
     const generation = state.generation;
-    state.selectedSessionId = sessionId;
+    state.selectedSessionId = state.selectedSessionId === sessionId ? '' : sessionId;
+    sessionId = state.selectedSessionId;
+    resetMessageView();
     renderSessions();
     renderSessionDetail();
+    renderMessages();
     try {
-      await Promise.all([refreshOwnership(), loadAttribution(sessionId, { reset: true })]);
-    } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation && selectedSession()?.id === sessionId) setText(el.claimMessage, error.message); }
+      await Promise.all([refreshOwnership(), loadAttribution(sessionId, { reset: true }), refreshMessages({ reset: true })]);
+    } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation && state.selectedSessionId === sessionId) toast(error.message, 'error'); }
   }
 
   function prepareReply(message) {
@@ -683,9 +705,11 @@
   async function acknowledgeMessage(message) {
     const generation = state.generation;
     try {
-      const body = !isOwner() && state.messageSessionId ? { sessionId: state.messageSessionId } : {};
-      await request(`/messages/${encodeURIComponent(message.id)}/ack`, { method: 'POST', body: JSON.stringify(body) });
+      const body = !isOwner() && message.toSessionId ? { sessionId: message.toSessionId } : {};
+      const payload = await request(`/messages/${encodeURIComponent(message.id)}/ack`, { method: 'POST', body: JSON.stringify(body) });
       if (generation !== state.generation) return;
+      state.messages = state.messages.map((item) => item.id === message.id ? payload.message : item);
+      renderMessages();
       toast('Receipt acknowledged. This is not an approval.');
       await refreshMessages();
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) toast(error.message, 'error'); }
@@ -746,11 +770,8 @@
     state.selectedSessionId = '';
     state.attributionGeneration += 1;
     state.attribution = { sessionId: '', segments: [], cursor: null, hasMore: false, loading: false, error: '' };
-    state.messageSessionId = '';
-    state.messageCursor = 0;
-    state.messageBefore = null;
-    state.messageViewSessionId = null;
-    state.hasMoreMessages = false;
+    resetMessageView();
+    el.messageFilter.value = '';
     state.replyTo = null;
     el.connectToken.value = '';
     el.projectFilter.value = '';
@@ -773,6 +794,8 @@
     el.sendMessage.textContent = '';
     el.inviteMessage.textContent = '';
     el.claimMessage.textContent = '';
+    el.setupFallback.hidden = true;
+    el.setupText.value = '';
     showConnection(false);
   }
 
@@ -796,6 +819,36 @@
   });
 
   el.logout.addEventListener('click', disconnect);
+  el.copyAgentSetup.addEventListener('click', async () => {
+    el.copyAgentSetup.disabled = true;
+    const generation = state.generation;
+    try {
+      const response = await fetch('/agent-setup.txt', { cache: 'no-store', redirect: 'error' });
+      if (!response.ok) throw new Error('Could not load agent setup instructions. Open the setup guide instead.');
+      const instructions = (await response.text()).replaceAll('{{HUB_URL}}', location.origin);
+      if (generation !== state.generation) return;
+      try {
+        await navigator.clipboard.writeText(instructions);
+        if (generation !== state.generation) return;
+        el.setupFallback.hidden = true;
+        el.setupText.value = '';
+        toast('Agent setup copied. Share it with the agent you want to connect.');
+      } catch {
+        if (generation !== state.generation) return;
+        el.setupText.value = instructions;
+        el.setupFallback.hidden = false;
+        el.setupText.focus();
+        el.setupText.select();
+      }
+    } catch (error) {
+      if (generation === state.generation) toast(error.message || 'Could not load agent setup instructions. Open the setup guide instead.', 'error');
+    } finally { el.copyAgentSetup.disabled = false; }
+  });
+  el.closeSetup.addEventListener('click', () => {
+    el.setupFallback.hidden = true;
+    el.setupText.value = '';
+    el.copyAgentSetup.focus();
+  });
   el.refresh.addEventListener('click', () => refresh());
   el.projectFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.agentNameFilter.addEventListener('change', () => refresh({ quiet: true }));
@@ -803,14 +856,18 @@
   el.environmentFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.statusFilter.addEventListener('change', renderSessions);
   el.staleFilter.addEventListener('change', renderSessions);
+  for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaiting, 'WAITING'], [el.summaryBlocked, 'BLOCKED']]) {
+    chip.addEventListener('click', () => {
+      el.statusFilter.value = el.statusFilter.value === status ? 'ALL' : status;
+      renderSessions();
+    });
+  }
+  el.summaryStale.addEventListener('click', () => {
+    el.staleFilter.checked = !el.staleFilter.checked;
+    renderSessions();
+  });
   el.messageFilter.addEventListener('change', async () => {
-    state.messageSessionId = el.messageFilter.value;
-    state.messages = [];
-    state.messageCursor = 0;
-    state.messageBefore = null;
-    state.messageViewSessionId = null;
-    state.hasMoreMessages = false;
-    renderSelectors();
+    resetMessageView();
     renderMessages();
     try { await refreshMessages({ reset: true }); } catch (error) { if (!(error instanceof StaleRequestError)) toast(error.message, 'error'); }
   });

@@ -204,9 +204,10 @@ async function api(request,env){
   }
   if(path==='/api/messages'&&method==='GET'){
     const after=numeric(url.searchParams.get('after')??0,'after');const sessionId=url.searchParams.get('sessionId');let query=MESSAGE_SELECT+' WHERE m.id>?',values=[after];
-    if(sessionId){const session=await sessionById(db,sessionId,principal,principal.role!=='owner');query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}
-    else if(principal.role!=='owner')fail(422,'SESSION_REQUIRED','Select your session inbox.');
+    if(sessionId){const session=await sessionById(db,sessionId,principal);query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}
     if(principal.role!=='owner'){query+=' AND (m.from_principal_id=? OR m.to_principal_id=?)';values.push(principal.id,principal.id);}
+    const kind=url.searchParams.get('kind');
+    if(kind!==null){if(!KINDS.has(kind))fail(422,'INVALID_KIND','Select a supported message kind.');query+=' AND m.kind=?';values.push(kind);}
     const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
     if(beforeValue!==null){if(after!==0||latest)fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');query+=' AND m.id<?';values.push(numeric(beforeValue,'before'));}
     const descending=latest||beforeValue!==null;

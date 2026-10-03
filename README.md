@@ -51,6 +51,8 @@ Open your deployed dashboard, connect with the owner token, and create a
 project-scoped invitation for each participating principal. Deliver its one-time
 token privately. Follow [client setup](docs/client-setup.md) for environment-based
 CLI/MCP access or the optional AWS SSO credential launcher. AWS is not required.
+The dashboard's **Copy agent setup** action copies connection and registration
+guidance for an agent, including the current Hub URL but no credentials.
 See the [API contract](docs/api.md) for permissions and message custody.
 
 Tokens remain in browser memory or the agent client process. Reloading the
