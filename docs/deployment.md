@@ -15,6 +15,20 @@ indexed scope queries and JSON attribution reads; D1 read usage grows with the
 number of authorized sessions. Retention runs daily. Existing account usage
 counts against the same quotas; enable paid services only with your own approval.
 
+Migration `0007_read_efficiency.sql` adds indexes for session ownership, message
+recipients, check-in history and enabled accountability policies. Back up the
+existing database before applying this additive migration; preserve all prior
+migrations, registrations, messages, cursors and claims. Complete dashboard
+pages reuse their existing lifecycle rows for accountability totals. Narrowed
+or capped pages retain a separate read so their totals keep the original scope.
+
+If D1 exhausts its free daily read allowance, API calls return HTTP 503 with
+`STORAGE_READ_QUOTA_EXCEEDED` and a `Retry-After` value for the next 00:00 UTC
+reset. Avoid repeatedly polling a known exhausted allowance. The hosting owner
+can review query usage and choose whether to wait for reset or authorize a paid
+plan. A paid plan has recurring and possible usage costs; the app never upgrades
+the account automatically. Other unexpected storage errors remain generic.
+
 ## Verify the provider runtime locally
 
 The committed database UUID is a placeholder. Local mode uses no account resources:
