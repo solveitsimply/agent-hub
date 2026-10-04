@@ -321,7 +321,8 @@
       : `${sessions.length} sessions shown after status and stale filters.`;
     el.sessionEmpty.hidden = sessions.length !== 0;
     for (const session of sessions) {
-      const card = node('button', `session-card${session.status === 'WAITING_ON_USER' || session.lifecycle?.attention==='WAITING_USER' ? ' needs-user' : ''}${session.id === state.selectedSessionId ? ' is-selected' : ''}`);
+      const wrapper = node('article', `session-card${session.status === 'WAITING_ON_USER' || session.lifecycle?.attention==='WAITING_USER' ? ' needs-user' : ''}${session.id === state.selectedSessionId ? ' is-selected' : ''}`);
+      const card = node('button', 'session-select');
       card.type = 'button';
       card.setAttribute('aria-pressed', String(session.id === state.selectedSessionId));
       const top = node('div', 'session-card-top');
@@ -348,7 +349,36 @@
         card.append(node('span','muted small',`Native coverage: ${life.coverage.replaceAll('_',' ')}${life.checkpoint?.nextCheckAt ? ' · next check '+formatTime(life.checkpoint.nextCheckAt):''}`));
       }
       card.addEventListener('click', () => selectSession(session.id));
-      el.sessions.append(card);
+      const copy = node('button', 'button button-quiet button-small session-copy', 'Copy session name & ID');
+      copy.type = 'button';
+      copy.setAttribute('aria-label', `Copy session name & ID: ${session.label || 'Session title not set'}`);
+      const fallback = node('div', 'session-copy-fallback');
+      fallback.hidden = true;
+      const reference = node('input');
+      reference.type = 'text';
+      reference.readOnly = true;
+      reference.setAttribute('aria-label', 'Session name and full Hub session ID');
+      fallback.append(node('p', 'muted small', 'Clipboard unavailable. Select and copy this session reference:'), reference);
+      copy.addEventListener('click', async () => {
+        const generation = state.generation;
+        const text = `${session.label || 'Session title not set'} (${session.id})`;
+        copy.disabled = true;
+        try {
+          await navigator.clipboard.writeText(text);
+          if (generation !== state.generation) return;
+          fallback.hidden = true;
+          reference.value = '';
+          toast('Session name & ID copied.');
+        } catch {
+          if (generation !== state.generation || !wrapper.isConnected) return;
+          reference.value = text;
+          fallback.hidden = false;
+          reference.focus();
+          reference.select();
+        } finally { copy.disabled = false; }
+      });
+      wrapper.append(card, copy, fallback);
+      el.sessions.append(wrapper);
     }
   }
 

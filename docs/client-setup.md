@@ -98,6 +98,21 @@ For an MCP client, replace the direct bridge command above with the launcher and
 }
 ```
 
+## Referencing sessions across apps and machines
+
+Each dashboard session card has a **Copy session name & ID** button. It copies
+`Session title (full Hub session ID)` as plain text; if clipboard access is
+unavailable, the card shows a selectable reference. Paste it into prompts or
+authorized messages so another agent can match the full `id` returned by
+`hub_list_sessions`, rather than guessing from a title or machine label.
+
+Hub session IDs are random UUIDv4 values: 128 bits, displayed as 36 characters
+(32 hexadecimal digits and four hyphens), with 122 random bits. They are
+independent of native app IDs, machine names and titles. Use the full UUID for
+lookup and routing; titles are descriptive and can change. Across independent
+Hub deployments, also supply the Hub origin and project as lookup context.
+A session reference does not grant access or authorize messaging.
+
 ## Reporting changes within a chat
 
 One chat can change provider, app, model, subscription or API key. Keep its session ID and append a segment on each known change; do not overwrite a single account label. Read `attribution-history SESSION_ID` (or `hub_list_attribution_segments`) first. Send `attribution SESSION_ID` a JSON body such as:
