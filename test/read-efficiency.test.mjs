@@ -5,8 +5,8 @@ import {SqliteD1} from './d1-sqlite.mjs';
 
 const OWNER='synthetic-owner-for-read-efficiency-test-1234567890';
 
-function fixture(t){
-  const DB=new SqliteD1();
+function fixture(t,options){
+  const DB=new SqliteD1(':memory:',options);
   t.after(()=>DB.close());
   const env={DB,OWNER_TOKEN:OWNER};
   return {DB,env,async call(token,path,body,method=body===undefined?'GET':'POST'){
@@ -15,6 +15,35 @@ function fixture(t){
     return {status:response.status,body:await response.json(),headers:response.headers};
   }};
 }
+
+test('schema 0006 discovery aggregates claims once and keeps project custody',async t=>{
+  const f=fixture(t,{throughMigration:'0006'}),actor=await invite(f,'old-schema',['alpha']),other=await invite(f,'foreign',['beta']);
+  const session=await register(f,actor.token,'alpha','DONE','local');
+  const foreign=await register(f,other.token,'beta','RUNNING','remote');
+  for(const [id,project] of [[session.id,'alpha'],[foreign.id,'beta']]){
+    for(let i=0;i<40;i++)f.DB.database.prepare('INSERT INTO ownership VALUES (?,?,?,?)').run(project,'claim-'+i,id,new Date().toISOString());
+  }
+  const statements=[],prepare=f.DB.prepare.bind(f.DB);
+  f.DB.prepare=sql=>{statements.push(sql);return prepare(sql);};
+  const result=await f.call(actor.token,'/api/sessions?view=full&status=DONE');
+  assert.equal(result.status,200);
+  assert.deepEqual(result.body.sessions.map(row=>row.id),[session.id]);
+  assert.equal(result.body.sessions[0].lifecycle.heldClaims,40);
+  assert.equal(result.body.summary.DONE,1);
+  assert.equal(result.body.summary.RUNNING,0);
+  const scans=statements.filter(sql=>sql.startsWith('SELECT s.*'));
+  assert.equal(scans.length,1);
+  const plan=f.DB.database.prepare('EXPLAIN QUERY PLAN '+scans[0]).all('alpha').map(row=>row.detail);
+  assert.equal(plan.filter(detail=>detail==='SCAN ownership').length,1);
+  assert.ok(!scans[0].includes('ownership WHERE owner_session_id=s.id'));
+});
+
+test('legacy minute trigger performs no database work or automated messaging',async()=>{
+  const env={DB:{prepare(){throw new Error('Unexpected scheduled read');},withSession(){throw new Error('Unexpected session scan');}}};
+  for(const scheduledTime of [Date.parse('2026-10-04T03:16:00Z'),Date.parse('2026-10-04T04:17:00Z')]){
+    await worker.scheduled({cron:'* * * * *',scheduledTime},env);
+  }
+});
 
 async function invite(f,name,projects){
   const result=await f.call(OWNER,'/api/principals',{name,account:name+'@example.test',projects});
@@ -53,7 +82,7 @@ test('D1 query plans use indexes for ownership, recipient delivery, check-in and
   expectIndexed('enabled accountability-policy enumeration','SELECT session_id FROM accountability_policies WHERE check_in_enabled=1',[],'accountability_policies',['check_in_enabled=?']);
 });
 
-test('complete session views reuse their scan; status and stale filters retain the authorized baseline',async t=>{
+test('session views share one baseline for cards, filters and complete summaries',async t=>{
   const f=fixture(t),alpha=await invite(f,'alpha-reader',['alpha']),other=await invite(f,'beta-reader',['alpha','beta']);
   await register(f,alpha.token,'alpha','RUNNING','alpha-live');
   const staleWaiting=await register(f,other.token,'alpha','WAITING_ON_USER','alpha-stale');
@@ -76,7 +105,7 @@ test('complete session views reuse their scan; status and stale filters retain t
   assert.equal(byStatus.body.summary.WAITING_ON_USER,1,'status filtering must not narrow the summary baseline');
   assert.equal(byStatus.body.summary.stale,1);
   assert.equal(byStatus.body.accountability.total,2,'status filtering must not narrow accountability');
-  assert.equal(sessionScans.length,2,'filtered views keep an independent authorized baseline scan');
+  assert.equal(sessionScans.length,1,'status filtering reuses the authorized baseline');
 
   sessionScans.length=0;
   const stale=await f.call(alpha.token,'/api/sessions?view=full&staleOnly=1');
@@ -84,11 +113,11 @@ test('complete session views reuse their scan; status and stale filters retain t
   assert.equal(stale.body.summary.RUNNING,1);
   assert.equal(stale.body.summary.WAITING_ON_USER,1);
   assert.equal(stale.body.accountability.total,2);
-  assert.equal(sessionScans.length,2);
+  assert.equal(sessionScans.length,1);
   assert.equal((await f.call(alpha.token,'/api/sessions?project=beta')).status,403,'an unauthorized project cannot enter the baseline');
 });
 
-test('the 2000-session cap keeps a separate complete accountability baseline',async t=>{
+test('the 2000 active-session ceiling retains complete counts with one scan',async t=>{
   const f=fixture(t),db=f.DB.database;
   db.exec('BEGIN');
   try{
@@ -109,7 +138,7 @@ test('the 2000-session cap keeps a separate complete accountability baseline',as
   assert.equal(response.body.summary.BLOCKED,1);
   assert.equal(response.body.accountability.total,2000,'the full capped population remains in accountability counts');
   assert.equal(response.body.accountability.categories.RECONCILE,2000);
-  assert.equal(sessionScans.length,2,'exactly 2000 is capped, so the accountability baseline is read separately');
+  assert.equal(sessionScans.length,1,'the admission ceiling is still a complete baseline');
 });
 
 test('authenticated D1 row-read quota errors are retryable and unexpected storage errors stay masked',async t=>{
