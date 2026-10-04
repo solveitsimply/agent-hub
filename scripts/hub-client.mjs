@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 /** Small, dependency-free client for the Agent Hub coordination API. */
+import { HubClientError } from './client-error.mjs';
+export { HubClientError } from './client-error.mjs';
+import { compactReceipt } from '../src/agent-view.mjs';
+import { cliOptions, readQuery, sessionFilterNames, sessionFlagNames } from './read-options.mjs';
 import { captureContext } from './local-context.mjs';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
@@ -8,15 +12,6 @@ import { fileURLToPath } from 'node:url';
 const MAX_REQUEST_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
-
-export class HubClientError extends Error {
-  constructor(code, message, status) {
-    super(message);
-    this.name = 'HubClientError';
-    this.code = code;
-    this.status = status;
-  }
-}
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -126,10 +121,21 @@ export async function readJsonStdin(stdin = process.stdin) {
 }
 
 function usage() {
-  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
+  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--kind KIND --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
+  const viewIndex=argv.indexOf('--view');
+  const view=viewIndex<0?'compact':argv[viewIndex+1];
+  if(!['compact','full'].includes(view)) throw new HubClientError('USAGE','view must be compact or full.');
+  // Read commands parse their own options; other commands use this for receipts.
+  const read=['sessions','inbox'].includes(argv[0]);
+  const input=read||viewIndex<0?argv:[...argv.slice(0,viewIndex),...argv.slice(viewIndex+2)];
+  const result=await runCliRaw(input,env);
+  return view==='compact'&&argv[0]!=='lifecycle'?compactReceipt(result):result;
+}
+
+async function runCliRaw(argv, env) {
   const [command, ...args] = argv;
   if (command === 'context') {
     if (args.length > 1) throw new HubClientError('USAGE', usage());
@@ -140,16 +146,16 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     if (args.length !== 1 || !args[0]) throw new HubClientError('USAGE', usage());
     return encodeURIComponent(args[0]);
   };
-  const optionalOne = () => {
-    if (args.length > 1) throw new HubClientError('USAGE', usage());
-    return args[0];
-  };
   switch (command) {
     case 'me':
       if (args.length) break;
       return client.request('GET', '/api/me');
-    case 'sessions':
-      return client.request('GET', '/api/sessions', { query: { project: optionalOne() } });
+    case 'sessions': {
+      const {options,positional}=cliOptions(args,sessionFilterNames,sessionFlagNames);
+      if(positional.length>1 || (positional.length && options.project!==undefined)) throw new HubClientError('USAGE',usage());
+      if(positional.length) options.project=positional[0];
+      return client.request('GET','/api/sessions',{query:readQuery(options,sessionFilterNames,sessionFlagNames)});
+    }
     case 'register':
       if (args.length) break;
       { const body = await readJsonStdin();
@@ -175,11 +181,14 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       return client.request('GET', `/api/sessions/${encodeURIComponent(args[0])}/attribution`, { query: { after } });
     }
     case 'inbox': {
-      if (args.length < 1 || args.length > 2 || !args[0]) break;
-      const after = args[1];
-      if (after !== undefined && (!/^(0|[1-9]\d*)$/u.test(after) || !Number.isSafeInteger(Number(after))))
-        throw new HubClientError('USAGE', 'after must be a nonnegative integer.');
-      return client.request('GET', '/api/messages', { query: { sessionId: args[0], after } });
+      const {options,positional}=cliOptions(args,['kind']);
+      if(positional.length<1||positional.length>2||!positional[0]) throw new HubClientError('USAGE',usage());
+      options.sessionId=positional[0];
+      if(positional[1]!==undefined) {
+        if(!/^(0|[1-9]\d*)$/u.test(positional[1])) throw new HubClientError('USAGE','after must be a nonnegative integer.');
+        options.after=Number(positional[1]);
+      }
+      return client.request('GET','/api/messages',{query:readQuery(options,['sessionId','after','kind'],[],100)});
     }
     case 'send': {
       if (args.length) break;

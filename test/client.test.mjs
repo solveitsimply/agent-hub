@@ -137,7 +137,7 @@ test('MCP stdio initializes, lists tools, sends nothing spontaneously, and requi
     let body = '';
     for await (const chunk of request) body += chunk;
     requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization, body: body ? JSON.parse(body) : undefined });
-    if (request.url === '/api/sessions') {
+    if (new URL(request.url,'http://test').pathname === '/api/sessions') {
       response.writeHead(403, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { code: 'DENIED', message: `Credential rejected: ${TOKEN}` } }));
       return;
@@ -204,7 +204,7 @@ test('MCP session listing forwards known and missing-label filters without broad
   } } });
   assert.equal(JSON.parse(await bridge.next()).result.isError, undefined);
   assert.deepEqual(Object.fromEntries(new URL(urls[0], url).searchParams), {
-    project: 'example-project', agentName: 'Codex', agentModel: 'reported-model', machine: 'test-host',
+    view:'compact',limit:'20',project: 'example-project', agentName: 'Codex', agentModel: 'reported-model', machine: 'test-host',
   });
 
   bridge.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hub_list_sessions', arguments: {
@@ -212,7 +212,7 @@ test('MCP session listing forwards known and missing-label filters without broad
   } } });
   assert.equal(JSON.parse(await bridge.next()).result.isError, undefined);
   assert.deepEqual(Object.fromEntries(new URL(urls[1], url).searchParams), {
-    project: 'example-project', agentNameUnknown: '1', agentModelUnknown: '1', machineUnknown: '1',
+    view:'compact',limit:'20',project: 'example-project', agentNameUnknown: '1', agentModelUnknown: '1', machineUnknown: '1',
   });
 
   bridge.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'hub_list_sessions', arguments: { agentNameUnknown: 'yes' } } });
@@ -307,4 +307,60 @@ test('MCP renames an existing chat without submitting replacement identity field
   const result=JSON.parse(await bridge.next());
   assert.equal(result.result.isError,undefined);
   assert.deepEqual(requests,[{method:'PATCH',url:'/api/sessions/existing-chat',body:{label:'Exact renamed app title'}}]);
+});
+
+test('CLI and MCP expose the same complete discovery filters and full escape hatch',async t=>{
+  const urls=[];
+  const url=await localServer(t,(request,response)=>{urls.push(request.url);response.end(JSON.stringify({sessions:[],messages:[],nextCursor:7}));});
+  const args={project:'shared',agentName:'Codex',agentModel:'Example model',machine:'host',repository:'github.com/example/app',branch:'dev',environment:'dev',status:'WAITING',attention:'WAITING',limit:5,view:'full'};
+  const cli=await runCli(['sessions','shared','--agent-name','Codex','--agent-model','Example model','--machine','host','--repository','github.com/example/app','--branch','dev','--environment','dev','--status','WAITING','--attention','WAITING','--limit','5','--view','full'],{url});
+  assert.equal(cli.code,0,cli.stderr);
+  const bridge=startBridge(url);t.after(()=>bridge.child.kill());
+  bridge.send({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'hub_list_sessions',arguments:args}});
+  assert.equal(JSON.parse(await bridge.next()).result.isError,undefined);
+  assert.deepEqual(Object.fromEntries(new URL(urls[0],url).searchParams),Object.fromEntries(new URL(urls[1],url).searchParams));
+  for(const options of [['--branch','dev'],['--agent-name','Codex','--agent-name-unknown'],['--typo','x'],['--limit','0']]){
+    assert.equal((await runCli(['sessions',...options],{url})).code,1);
+  }
+  assert.equal(urls.length,2,'invalid filters fail before any request');
+  const inbox=await runCli(['inbox','session-id','7','--kind','NOTE','--limit','1'],{url});
+  assert.equal(inbox.code,0,inbox.stderr);
+  bridge.send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'hub_read_inbox',arguments:{sessionId:'session-id',after:7,kind:'NOTE',limit:1}}});
+  assert.equal(JSON.parse(await bridge.next()).result.isError,undefined);
+  assert.deepEqual(Object.fromEntries(new URL(urls[2],url).searchParams),Object.fromEntries(new URL(urls[3],url).searchParams));
+});
+
+test('compact write receipts omit echoes but retain revision; full is stripped from mutation body',async t=>{
+  const bodies=[];
+  const session={id:'session',label:'Exact title',project:'shared',status:'RUNNING',task:'Long task',details:{evidence:['large fixture']},lifecycle:{revision:8,attention:'WORKING',heldClaims:0,checkpoint:{nextAction:'Continue'}}};
+  const url=await localServer(t,async(request,response)=>{let body='';for await(const chunk of request)body+=chunk;bodies.push(JSON.parse(body));response.end(JSON.stringify({session}));});
+  const bridge=startBridge(url);t.after(()=>bridge.child.kill());
+  for(const [id,view] of [[1,'compact'],[2,'full']]){
+    bridge.send({jsonrpc:'2.0',id,method:'tools/call',params:{name:'hub_update_session',arguments:{sessionId:'session',status:'RUNNING',view}}});
+    const result=JSON.parse(JSON.parse(await bridge.next()).result.content.at(-1).text).session;
+    assert.equal(result.lifecycle.revision,8);
+    if(view==='compact'){assert.equal('details' in result,false);assert.equal('task' in result,false);}
+    else assert.deepEqual(result,session);
+  }
+  const cli=await runCli(['update','session','--view','full'],{url,input:JSON.stringify({status:'RUNNING'})});
+  assert.equal(cli.code,0,cli.stderr);assert.deepEqual(JSON.parse(cli.stdout).session,session);
+  assert.deepEqual(bodies,[{status:'RUNNING'},{status:'RUNNING'},{status:'RUNNING'}]);
+});
+
+test('checkpoint receipts retain current revision while lifecycle reads retain complete evidence',async t=>{
+  const lifecycle={revision:9,attention:'WORKING',heldClaims:0,checkpoint:{outcome:'Long outcome',acceptanceCriteria:'Meaningful evidence',nextAction:'Continue',completionEvidence:['immutable evidence reference']},observation:{state:'active'}};
+  const requests=[];
+  const url=await localServer(t,async(request,response)=>{
+    let body='';for await(const chunk of request)body+=chunk;
+    requests.push({method:request.method,body:body?JSON.parse(body):null});
+    response.end(JSON.stringify(request.method==='GET'?{lifecycle}:{session:{id:'session',status:'RUNNING',lifecycle}}));
+  });
+  const bridge=startBridge(url);t.after(()=>bridge.child.kill());
+  bridge.send({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'hub_record_checkpoint',arguments:{sessionId:'session',expectedRevision:8,checkpoint:lifecycle.checkpoint}}});
+  const written=JSON.parse(JSON.parse(await bridge.next()).result.content.at(-1).text);
+  assert.equal(written.session.lifecycle.revision,9);assert.equal('checkpoint' in written.session.lifecycle,false);
+  bridge.send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'hub_read_lifecycle',arguments:{sessionId:'session'}}});
+  assert.deepEqual(JSON.parse(JSON.parse(await bridge.next()).result.content.at(-1).text),{lifecycle});
+  const cli=await runCli(['lifecycle','session'],{url});assert.equal(cli.code,0,cli.stderr);assert.deepEqual(JSON.parse(cli.stdout),{lifecycle});
+  assert.deepEqual(requests[0].body,{expectedRevision:8,checkpoint:lifecycle.checkpoint});
 });

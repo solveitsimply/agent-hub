@@ -1,3 +1,4 @@
+import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
 import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint, reconcile } from './lifecycle.mjs';
 import { lifecycleApi, observerApi } from './lifecycle-api.mjs';
@@ -122,6 +123,14 @@ async function messageById(db,id,principal){
   if(principal.role!=='owner'&&(row.review_state!=='APPROVED'||row.to_session_id===null))fail(403,'MESSAGE_NOT_DELIVERED','This message is not available to connected agents.');return row;
 }
 function numeric(value,name){const result=Number(value);if(!Number.isSafeInteger(result)||result<0)fail(422,'INVALID_CURSOR',`${name} must be a nonnegative integer.`);return result;}
+function readOptions(url, maximum) {
+  const view=url.searchParams.get('view')??'full';
+  if(!['compact','full'].includes(view))fail(422,'INVALID_VIEW','Use compact or full.');
+  const raw=url.searchParams.get('limit');
+  const limit=raw===null?(view==='compact'?20:maximum):Number(raw);
+  if((raw!==null&&!/^[1-9]\d*$/.test(raw))||!Number.isSafeInteger(limit)||limit<1||limit>maximum)fail(422,'INVALID_LIMIT',`limit must be 1 to ${maximum}.`);
+  return {view,limit};
+}
 async function api(request,env){
   const url=new URL(request.url);const origin=request.headers.get('origin');
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
@@ -153,6 +162,7 @@ async function api(request,env){
     await audit(db,principal,'invite.revoked',principalMatch[1]).run();return json({revoked:true});
   }
   if(path==='/api/sessions'&&method==='GET'){
+    const {view,limit}=readOptions(url,200);
     const project=url.searchParams.get('project');if(project)requireProject(principal,slug(project));
     let scope=' WHERE s.archived_at IS NULL',scopeValues=[];
     if(project){scope+=' AND s.project=?';scopeValues=[project];}
@@ -165,6 +175,7 @@ async function api(request,env){
     const rows=await db.prepare(SESSION_SELECT+where+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 2000').bind(...values).all();
     const ordered=rows.results.map(row=>sessionView(row,principal,aliases)).filter(session=>!attention||session.lifecycle.attention===attention).sort((a,b)=>ATTENTION.indexOf(a.lifecycle.attention)-ATTENTION.indexOf(b.lifecycle.attention));
     const total=ordered.length;
+    if(view==='compact')return json({sessions:ordered.slice(0,limit).map(compactSession),limit,total,hasMore:total>limit});
     const options=await db.prepare(`SELECT DISTINCT s.machine,s.environment,${AGENT_NAME_SQL} AS agent_name,json_extract(a.metadata_json,'$.model') AS agent_model,json_extract(s.details_json,'$.workContext.repository') AS repository,json_extract(s.details_json,'$.workContext.branch') AS branch`+SESSION_FROM+scope).bind(...scopeValues).all();
     const distinct=key=>[...new Set(options.results.map(row=>row[key]??null))].sort((left,right)=>left===null?1:right===null?-1:left.localeCompare(right));
     const machines=[...new Set(options.results.map(row=>canonicalMachine(row.machine,aliases)))].sort((a,b)=>a===null?1:b===null?-1:a.localeCompare(b));
@@ -174,7 +185,7 @@ async function api(request,env){
     const all=await db.prepare(SESSION_SELECT+filteredScope+' LIMIT 2000').bind(...filterValues).all();
     const accountability={categories:Object.fromEntries(ATTENTION.map(key=>[key,0])),unaccounted:0,oldestUnaccountedAt:null,checkpointCoverage:0,observerCoverage:0,total:all.results.length,unaccountedClaims:0};
     for(const row of all.results){const value=lifecycleView(row);accountability.categories[value.attention]++;if(value.checkpoint)accountability.checkpointCoverage++;if(value.coverage==='available')accountability.observerCoverage++;if(value.unaccounted){accountability.unaccounted++;accountability.unaccountedClaims+=value.heldClaims;if(!accountability.oldestUnaccountedAt||value.unaccountedSince<accountability.oldestUnaccountedAt)accountability.oldestUnaccountedAt=value.unaccountedSince;}}
-    return json({sessions:ordered.slice(0,200),limit:200,total,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
+    return json({sessions:ordered.slice(0,limit),limit,total,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
   }
   if(path==='/api/sessions'&&method==='POST'){
     const body=await readBody();checkKeys(body,['externalId','machine','label','project','task','status','environment','workContext','details','checkpoint']);
@@ -262,6 +273,7 @@ async function api(request,env){
     if(!row)fail(409,'MESSAGE_CAPACITY','Session or invitation custody changed, or message capacity was reached.');if(row.payload_hash!==payloadHash)fail(409,'IDEMPOTENCY_CONFLICT','That idempotency key already belongs to different message content.');return json({message:messageView(row,principal)},201);
   }
   if(path==='/api/messages'&&method==='GET'){
+    const {view,limit}=readOptions(url,100);
     const owner=principal.role==='owner',cursorColumn=owner?'m.id':'m.delivery_id';
     const after=numeric(url.searchParams.get('after')??0,'after');const sessionId=url.searchParams.get('sessionId');let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
     if(sessionId){const session=await sessionById(db,sessionId,principal);query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}
@@ -272,10 +284,11 @@ async function api(request,env){
     const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
     if(beforeValue!==null){if(after!==0||latest)fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');query+=` AND ${cursorColumn}<?`;values.push(numeric(beforeValue,'before'));}
     const descending=latest||beforeValue!==null;
-    const rows=await db.prepare(query+` ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT 100`).bind(...values).all();
-    const ordered=descending?rows.results.reverse():rows.results;
+    const rows=await db.prepare(query+` ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1}`).bind(...values).all();
+    const hasMore=rows.results.length>limit,page=rows.results.slice(0,limit);
+    const ordered=descending?page.reverse():page;
     const cursor=row=>owner?row.id:row.delivery_id;
-    return json({messages:ordered.map(row=>messageView(row,principal)),nextCursor:ordered.length?cursor(ordered.at(-1)):after,nextBefore:descending&&ordered.length===100?cursor(ordered[0]):null});
+    return json({messages:ordered.map(row=>{const message=messageView(row,principal);return view==='compact'?compactMessage(message):message;}),nextCursor:ordered.length?cursor(ordered.at(-1)):after,nextBefore:descending&&(view==='compact'?hasMore:ordered.length===limit)?cursor(ordered[0]):null,...(view==='compact'?{limit,hasMore}:{})});
   }
   const ackMatch=path.match(/^\/api\/messages\/(\d+)\/ack$/);
   if(ackMatch&&method==='POST'){

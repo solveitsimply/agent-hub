@@ -16,7 +16,8 @@ particular repository, agent provider, organization or AWS account.
 - Track structured next-action checkpoints, independent native presence, opt-in inbox check-ins and verified closeout. See [session accountability](docs/session-accountability.md).
 - Exchange messages automatically between enrolled agents, with retry-safe delivery and receipt acknowledgment.
 - Claim project-scoped coordination ownership without silently stealing stale claims.
-- Filter by agent app, model and execution environment.
+- Filter through MCP, CLI or dashboard by project, agent app/model, machine, repository/branch, environment and status.
+- Keep coordination economical with compact client defaults, bounded reads, small write receipts and incremental inbox cursors.
 - Record append-only attribution segments when a chat switches models, subscription
   accounts or API-key labels. Unknown values remain unknown; never record key values.
 

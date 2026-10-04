@@ -43,6 +43,14 @@ assert.equal((await call(a.body.token,'/api/sessions/'+x.id,{environment:'stagin
 const contextFiltered=await call(owner,'/api/sessions?status=WAITING_ON_AGENT&environment=staging&repository='+encodeURIComponent(workContext.repository)+'&branch=feature%2Fcontext&machine=MAC-LOCAL-FIXTURE');
 assert.equal(contextFiltered.body.sessions.length,1);assert.equal(contextFiltered.body.sessions[0].id,x.id);assert.deepEqual(contextFiltered.body.sessions[0].workContext,workContext);
 assert.equal(contextFiltered.body.summary.WAITING_ON_AGENT,1);
+const compact=await call(a.body.token,'/api/sessions?view=compact&limit=1&project=sample-project-fixture&repository='+encodeURIComponent(workContext.repository)+'&branch=feature%2Fcontext&environment=staging&status=WAITING_ON_AGENT');
+assert.equal(compact.status,200);assert.equal(compact.body.sessions.length,1);assert.equal(compact.body.sessions[0].id,x.id);assert.equal(compact.body.hasMore,false);assert.equal('filterOptions' in compact.body,false);assert.equal('details' in compact.body.sessions[0],false);
+const compactInbox=await call(b.body.token,'/api/messages?view=compact&limit=1&sessionId='+y.id);
+assert.equal(compactInbox.status,200);assert.equal(compactInbox.body.messages[0].id,sent.body.message.id);assert.equal(compactInbox.body.messages[0].body,payload.body);assert.equal(compactInbox.body.nextCursor,compactInbox.body.messages[0].deliveryCursor);
+const incremental=await call(b.body.token,'/api/messages?view=compact&sessionId='+y.id+'&after='+compactInbox.body.nextCursor);
+assert.deepEqual(incremental.body.messages,[]);assert.equal(incremental.body.nextCursor,compactInbox.body.nextCursor);assert.equal(incremental.body.hasMore,false);
+assert.equal((await call(a.body.token,'/api/sessions?view=compact&limit=201')).status,422);
+
 assert.equal((await call(b.body.token,'/api/sessions/'+x.id,{workContext:null},'PATCH')).status,403);
 const redacted=(await call(a.body.token,'/api/sessions')).body.sessions.find(s=>s.id===x.id);assert.deepEqual(redacted.workContext,workContext);
 const checkpoint=await call(a.body.token,`/api/sessions/${x.id}/checkpoint`,{expectedRevision:redacted.lifecycle.revision,checkpoint:{outcome:'Complete synthetic coordination fixture',acceptanceCriteria:'Native D1 custody and observation checks pass',nextCheckAt:new Date(Date.now()-600000).toISOString(),wait:{kind:'external',reason:'Synthetic expected event'}}},'PUT');assert.equal(checkpoint.status,200);
@@ -59,7 +67,7 @@ assert.equal((await call(a.body.token,`/api/messages?sessionId=${x.id}`)).body.m
 assert.equal((await call(owner,`/api/observers/${observer.body.observer.id}`,{},'DELETE')).status,200);
 assert.equal((await call(observer.body.token,'/api/observer')).status,401);
 const receipt={observedAt:timestamp,runtime:'Cloudflare workerd + local D1',scope:'Synthetic localhost only',checks:['authentication','automatic enrolled delivery','no human review gate','cross-principal handoff','idempotency','recipient acknowledgment','spoofing refusal','custody conflict refusal','heartbeat','same-session rename','project-scoped metadata discovery','latest attribution filters','unknown facets','qualified Git context','independent target environment','status summary','context visibility and custody'],sessions:[x.id,y.id],messageId:sent.body.message.id};
-receipt.checks.push('checkpoint revision','observer exact mapping','observer cannot read inbox','native active suppresses check-in','deduplicated inbox check-in','observer revocation');
+receipt.checks.push('compact qualified discovery','bounded compact reads','complete compact inbox body','incremental delivery cursor','checkpoint revision','observer exact mapping','observer cannot read inbox','native active suppresses check-in','deduplicated inbox check-in','observer revocation');
 await mkdir(new URL('../.evidence/',import.meta.url),{recursive:true});
 await writeFile(process.env.HUB_FIXTURE_EVIDENCE_PATH??new URL('../.evidence/native-worker.json',import.meta.url),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});
 console.log(JSON.stringify(receipt,null,2));
