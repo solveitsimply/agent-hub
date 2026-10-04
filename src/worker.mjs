@@ -1,4 +1,6 @@
 import { parseAttribution, attributionView } from './attribution.mjs';
+import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint, reconcile } from './lifecycle.mjs';
+import { lifecycleApi, observerApi } from './lifecycle-api.mjs';
 import { attributionLabels, canonicalAgentName, agentNameSql, machineAliases, canonicalMachine, machineFilterValues, ENVIRONMENTS, parseWorkContext } from './session-context.mjs';
 const STATUSES = new Set(['RUNNING','WAITING_ON_USER','WAITING_ON_AGENT','BLOCKED','DONE']);
 const KINDS = new Set(['NOTE','HANDOFF','QUESTION','ANSWER']);
@@ -31,7 +33,7 @@ async function requireCurrent(db,principal){
   if(!await db.prepare('SELECT 1 FROM principals WHERE id=? AND active=1').bind(principal.id).first())fail(401,'UNAUTHORIZED','This invitation has been revoked.');
 }
 const noSecrets = value=>{
-  if(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+[\w.+/=~-]{16,}|\b(?:hub_agent_|hub_owner_)[A-Za-z0-9_-]{20,}|\b(?:sk-|AIza)[A-Za-z0-9_-]{20,}|\b(?:password|api[_ -]?key|access[_ -]?token|verification[_ -]?code|step[_ -]?up[_ -]?code)\s*[=:]\s*["']?\S{4,}/i.test(value))
+  if(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+[\w.+/=~-]{16,}|\b(?:hub_agent_|hub_owner_|hub_observer_)[A-Za-z0-9_-]{20,}|\b(?:sk-|AIza)[A-Za-z0-9_-]{20,}|\b(?:password|api[_ -]?key|access[_ -]?token|verification[_ -]?code|step[_ -]?up[_ -]?code)\s*[=:]\s*["']?\S{4,}/i.test(value))
     fail(422,'SECRET_DETECTED','Remove credentials or verification codes before sharing coordination content.');
 };
 async function bodyOf(request){
@@ -80,11 +82,12 @@ const latestAttribution = row=>{
 // remains untrusted evidence, never human approval or execution authority.
 const sessionView = (row,principal,aliases)=>{
   const {workContext=null,...details}=JSON.parse(row.details_json),machine=canonicalMachine(row.machine,aliases);
-  return {id:row.id,principalId:row.principal_id,principalName:row.principal_name,account:row.account,externalId:row.external_id,machine:machine,reportedMachine:machine!==row.machine?row.machine:null,label:row.label,project:row.project,task:row.task,status:row.status,environment:ENVIRONMENTS.includes(row.environment)?row.environment:null,workContext:workContext,details:details,latestAttribution:latestAttribution(row),createdAt:row.created_at,lastSeenAt:row.last_seen_at,archivedAt:row.archived_at,stale:Date.now()-Date.parse(row.last_seen_at)>180000};
+  const lifecycle=lifecycleView(row),interval=lifecycle.checkpoint?.presenceIntervalSeconds;
+  return {id:row.id,principalId:row.principal_id,principalName:row.principal_name,account:row.account,externalId:row.external_id,machine:machine,reportedMachine:machine!==row.machine?row.machine:null,label:row.label,project:row.project,task:row.task,status:row.status,environment:ENVIRONMENTS.includes(row.environment)?row.environment:null,workContext:workContext,details:details,latestAttribution:latestAttribution(row),createdAt:row.created_at,lastSeenAt:row.last_seen_at,archivedAt:row.archived_at,stale:Date.now()-Date.parse(row.last_seen_at)>(interval??60)*3000,lifecycle};
 };
 const segmentView=row=>attributionView(row);
 const SESSION_FROM=' FROM sessions s JOIN principals p ON p.id=s.principal_id LEFT JOIN session_attribution_segments a ON a.id=(SELECT id FROM session_attribution_segments WHERE session_id=s.id ORDER BY id DESC LIMIT 1)';
-const SESSION_SELECT='SELECT s.*,p.name AS principal_name,p.account,a.metadata_json AS latest_attribution_json'+SESSION_FROM;
+const SESSION_SELECT='SELECT s.*,p.name AS principal_name,p.account,a.metadata_json AS latest_attribution_json'+LIFECYCLE_COLUMNS+SESSION_FROM;
 const AGENT_NAME_SQL=agentNameSql("json_extract(a.metadata_json,'$.client')");
 const sessionFilters = (url,aliases)=>{
   const clauses=[],values=[];
@@ -124,12 +127,16 @@ async function api(request,env){
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
   if(origin&&origin!==url.origin)fail(403,'ORIGIN_DENIED','Cross-origin coordination requests are disabled.');
   if(!env.DB)fail(503,'NOT_CONFIGURED','Coordination database is not configured.');
-  const db=env.DB.withSession('first-primary');const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
+  const db=env.DB.withSession('first-primary');
+  if(url.pathname.startsWith('/api/observer/')||url.pathname==='/api/observer'||request.headers.get('authorization')?.startsWith('Bearer hub_observer_'))return observerApi({request,db,path:url.pathname,method:request.method,readBody:()=>bodyOf(request),digest,fail,checkKeys,string,json});
+  const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
   const path=url.pathname,method=request.method;
+  const lifecycleResponse=await lifecycleApi({path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select:SESSION_SELECT,messageById});
+  if(lifecycleResponse)return lifecycleResponse;
   if(path==='/api/me'&&method==='GET')return json({principal});
   if(path==='/api/principals'&&method==='GET'){
-    ownerOnly(principal);const rows=await db.prepare('SELECT id,name,account,role,projects_json,active FROM principals ORDER BY created_at DESC LIMIT 200').all();return json({principals:rows.results.map(principalView)});
+    ownerOnly(principal);const rows=await db.prepare("SELECT id,name,account,role,projects_json,active FROM principals WHERE id!='hub-accountability' ORDER BY created_at DESC LIMIT 200").all();return json({principals:rows.results.map(principalView)});
   }
   if(path==='/api/principals'&&method==='POST'){
     ownerOnly(principal);const body=await readBody();checkKeys(body,['name','account','projects']);
@@ -141,7 +148,7 @@ async function api(request,env){
   }
   const principalMatch=path.match(/^\/api\/principals\/([^/]+)$/);
   if(principalMatch&&method==='DELETE'){
-    ownerOnly(principal);if(principalMatch[1]==='owner')fail(403,'OWNER_IMMUTABLE','The owner cannot be revoked through invitations.');
+    ownerOnly(principal);if(['owner','hub-accountability'].includes(principalMatch[1]))fail(403,'OWNER_IMMUTABLE','Workspace identities cannot be revoked through invitations.');
     const result=await db.prepare('UPDATE principals SET active=0 WHERE id=? AND role=\'agent\'').bind(principalMatch[1]).run();if(!result.meta.changes)fail(404,'PRINCIPAL_NOT_FOUND','Invitation not found.');
     await audit(db,principal,'invite.revoked',principalMatch[1]).run();return json({revoked:true});
   }
@@ -153,25 +160,34 @@ async function api(request,env){
     const filters=sessionFilters(url,aliases),filteredScope=scope+(filters.clauses.length?' AND '+filters.clauses.join(' AND '):''),filterValues=[...scopeValues,...filters.values];
     let where=filteredScope,values=[...filterValues];
     const status=url.searchParams.get('status');if(status!==null){if(status==='WAITING')where+=" AND s.status IN ('WAITING_ON_USER','WAITING_ON_AGENT')";else{if(!STATUSES.has(status))fail(422,'INVALID_FILTER','Select a supported status.');where+=' AND s.status=?';values.push(status);}}
-    const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null){if(staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');where+=" AND s.status!='DONE' AND s.last_seen_at<?";values.push(new Date(Date.now()-180000).toISOString());}
-    const rows=await db.prepare(SESSION_SELECT+where+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 200').bind(...values).all();
-    const total=await db.prepare('SELECT COUNT(*) AS total'+SESSION_FROM+where).bind(...values).first('total');
+    const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null){if(staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');where+=" AND s.status!='DONE' AND (julianday(?) - julianday(s.last_seen_at))*86400 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3";values.push(now());}
+    const attention=url.searchParams.get('attention');if(attention!==null&&!ATTENTION.includes(attention))fail(422,'INVALID_FILTER','Select a supported attention category.');
+    const rows=await db.prepare(SESSION_SELECT+where+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 2000').bind(...values).all();
+    const ordered=rows.results.map(row=>sessionView(row,principal,aliases)).filter(session=>!attention||session.lifecycle.attention===attention).sort((a,b)=>ATTENTION.indexOf(a.lifecycle.attention)-ATTENTION.indexOf(b.lifecycle.attention));
+    const total=ordered.length;
     const options=await db.prepare(`SELECT DISTINCT s.machine,s.environment,${AGENT_NAME_SQL} AS agent_name,json_extract(a.metadata_json,'$.model') AS agent_model,json_extract(s.details_json,'$.workContext.repository') AS repository,json_extract(s.details_json,'$.workContext.branch') AS branch`+SESSION_FROM+scope).bind(...scopeValues).all();
     const distinct=key=>[...new Set(options.results.map(row=>row[key]??null))].sort((left,right)=>left===null?1:right===null?-1:left.localeCompare(right));
     const machines=[...new Set(options.results.map(row=>canonicalMachine(row.machine,aliases)))].sort((a,b)=>a===null?1:b===null?-1:a.localeCompare(b));
     const branches=[...new Map(options.results.map(row=>{const value=row.repository&&row.branch?{repository:row.repository,branch:row.branch}:null;return [JSON.stringify(value),value];})).values()];
-    const summaryRows=await db.prepare('SELECT s.status,COUNT(*) AS total,SUM(CASE WHEN s.last_seen_at<? THEN 1 ELSE 0 END) AS stale'+SESSION_FROM+filteredScope+' GROUP BY s.status').bind(new Date(Date.now()-180000).toISOString(),...filterValues).all();
+    const summaryRows=await db.prepare("SELECT s.status,COUNT(*) AS total,SUM(CASE WHEN (julianday(?) - julianday(s.last_seen_at))*86400 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3 THEN 1 ELSE 0 END) AS stale"+SESSION_FROM+filteredScope+' GROUP BY s.status').bind(now(),...filterValues).all();
     const summary={RUNNING:0,WAITING_ON_USER:0,WAITING_ON_AGENT:0,BLOCKED:0,DONE:0,stale:0};for(const row of summaryRows.results){summary[row.status]=row.total;if(row.status!=='DONE')summary.stale+=row.stale;}
-    return json({sessions:rows.results.map(row=>sessionView(row,principal,aliases)),limit:200,total,summary,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
+    const all=await db.prepare(SESSION_SELECT+filteredScope+' LIMIT 2000').bind(...filterValues).all();
+    const accountability={categories:Object.fromEntries(ATTENTION.map(key=>[key,0])),unaccounted:0,oldestUnaccountedAt:null,checkpointCoverage:0,observerCoverage:0,total:all.results.length,unaccountedClaims:0};
+    for(const row of all.results){const value=lifecycleView(row);accountability.categories[value.attention]++;if(value.checkpoint)accountability.checkpointCoverage++;if(value.coverage==='available')accountability.observerCoverage++;if(value.unaccounted){accountability.unaccounted++;accountability.unaccountedClaims+=value.heldClaims;if(!accountability.oldestUnaccountedAt||value.unaccountedSince<accountability.oldestUnaccountedAt)accountability.oldestUnaccountedAt=value.unaccountedSince;}}
+    return json({sessions:ordered.slice(0,200),limit:200,total,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
   }
   if(path==='/api/sessions'&&method==='POST'){
-    const body=await readBody();checkKeys(body,['externalId','machine','label','project','task','status','environment','workContext','details']);
+    const body=await readBody();checkKeys(body,['externalId','machine','label','project','task','status','environment','workContext','details','checkpoint']);
     const project=slug(body.project);requireProject(principal,project);const externalId=string(body.externalId,'externalId',160),machine=string(body.machine,'machine',120);
     const status=body.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
     const id=crypto.randomUUID(),date=now();
     const environment=string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use dev, staging, production or local for the target application instance.');
     const details=detailsOf(body.details);if(body.workContext!==undefined)details.workContext=parseWorkContext(body.workContext,fail);
-    await db.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM sessions WHERE principal_id=?)<1000 AND (SELECT COUNT(*) FROM sessions)<10000 AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL AND principal_id=?)<100 AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL)<2000 ON CONFLICT(principal_id,external_id) DO NOTHING').bind(id,principal.id,externalId,machine,string(body.label,'label',120),project,string(body.task,'task',2000),status,environment,JSON.stringify(details),date,date,principal.id,principal.id,principal.id).run();
+    const checkpoint=body.checkpoint===undefined?null:parseCheckpoint(body.checkpoint,{fail,string,checkKeys});
+    if(checkpoint?.wait?.sessionId){const dependency=await sessionById(db,checkpoint.wait.sessionId,principal);if(dependency.project!==project)fail(403,'PROJECT_MISMATCH','Dependency must belong to this project.');}
+    if(checkpoint?.wait?.messageId){const message=await messageById(db,Number(checkpoint.wait.messageId),principal);if(message.project!==project)fail(403,'PROJECT_MISMATCH','Message must belong to this project.');}
+    if(checkpoint?.wait)checkpoint.waitStartedAt=date;
+    await db.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at,checkpoint_json,checkpoint_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM sessions WHERE principal_id=?)<1000 AND (SELECT COUNT(*) FROM sessions)<10000 AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL AND principal_id=?)<100 AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL)<2000 ON CONFLICT(principal_id,external_id) DO NOTHING').bind(id,principal.id,externalId,machine,string(body.label,'label',120),project,string(body.task,'task',2000),status,environment,JSON.stringify(details),date,date,checkpoint?JSON.stringify(checkpoint):null,checkpoint?date:null,principal.id,principal.id,principal.id).run();
     await requireCurrent(db,principal);
     const row=await db.prepare(`${SESSION_SELECT} WHERE s.principal_id=? AND s.external_id=?`).bind(principal.id,externalId).first();
     if(!row)fail(409,'SESSION_CAPACITY','Session capacity reached (100/2000 active or 1000/10000 retained per principal/workspace). Archiving preserves retained history.');
@@ -202,8 +218,9 @@ async function api(request,env){
     const body=await readBody();checkKeys(body,[]);const row=await sessionById(db,archiveMatch[1],principal,true);
     if(row.archived_at)return json({session:sessionView(row,principal,aliases)});
     if(row.status!=='DONE')fail(409,'SESSION_NOT_DONE','Only a completed session may be archived.');
+    if(row.checkpoint_json && lifecycleView(row).attention!=='COMPLETE')fail(409,'CLOSEOUT_REQUIRED','Record objective, workspace and native-chat closeout before archiving this checkpoint-enabled session.');
     const held=await db.prepare('SELECT 1 FROM ownership WHERE owner_session_id=? LIMIT 1').bind(row.id).first();if(held)fail(409,'OWNERSHIP_HELD','Release this session’s coordination claims before archiving.');
-    await db.batch([db.prepare('UPDATE sessions SET archived_at=? WHERE id=? AND principal_id=? AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND status=\'DONE\' AND NOT EXISTS(SELECT 1 FROM ownership WHERE owner_session_id=?)').bind(now(),row.id,principal.id,principal.id,row.id),audit(db,principal,'session.archive.requested',row.id)]);
+    await db.batch([db.prepare('UPDATE sessions SET archived_at=? WHERE id=? AND principal_id=? AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND status=\'DONE\' AND NOT EXISTS(SELECT 1 FROM ownership WHERE owner_session_id=?) AND revision=?').bind(now(),row.id,principal.id,principal.id,row.id,row.revision),audit(db,principal,'session.archive.requested',row.id)]);
     await requireCurrent(db,principal);const current=await sessionById(db,row.id,principal,true);if(!current.archived_at)fail(409,'OWNERSHIP_HELD','Session custody changed; recheck its claims before archiving.');return json({session:sessionView(current,principal,aliases)});
   }
   const sessionMatch=path.match(/^\/api\/sessions\/([^/]+)(\/heartbeat)?$/);
@@ -305,6 +322,9 @@ export default {
     }
   },
   async scheduled(_event,env){
+    await reconcile(env.DB.withSession('first-primary'),SESSION_SELECT,{digest,fail});
+    if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCHours()!==3)return;
+    if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCMinutes()!==17)return;
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();
     await env.DB.batch([env.DB.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),env.DB.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
   },

@@ -1,6 +1,6 @@
 # Session accountability and continuation — implementation proposal
 
-Status: researched proposal. Presence labels and completed-session exclusions are implemented; the reconciler, automatic check-ins and continuation controls below are not enabled.
+Status: approved staged rollout. Checkpoints, independent observation, attention queues, deduplicated opt-in Hub check-ins and closeout tracking are implemented. See [session accountability](session-accountability.md). Native observation requires the correct existing authority. Automatic native continuation remains a later capability enrollment; this release does not start native turns.
 
 ## Outcome
 
@@ -47,7 +47,7 @@ Use a session revision and conditional update/dispatch so user input, a new turn
 
 Suggested first check-in: “The Hub has not received the checkpoint expected at TIME. Report whether your objective is complete, executing, awaiting a specific person/event, paused, or blocked. If unfinished, identify the next action and next check time. Preserve current work and approval boundaries.” It asks for evidence, not why a timer happened to expire.
 
-Current message admission requires the human owner to approve exact recipient payloads. A check-in in PENDING has not reached the agent; delivery has not started a native turn; acknowledgment has not proven progress. Never provision owner credentials to adapters or mark transport receipt as resolution. Begin with batching suggestions for owner review. An eventual scoped machine-generated control protocol would need independent review, bounded schemas and recipient-local authorization before it could replace any delivery gate.
+Current admission permits coordination within enrolled project scope. The owner selects sessions for automatic check-ins; separate read-only observer credentials report exact native mappings. Delivery does not start a native turn and acknowledgment does not prove progress. Never provision owner credentials to adapters. Native continuation requires independent capability enrollment and bounded recipient-local authorization.
 
 ## Timing and continuation policy
 

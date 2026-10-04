@@ -1,5 +1,7 @@
 # Agent Hub API contract
 
+See [session accountability](session-accountability.md#api-additions) for checkpoint, observation, reconciliation and closeout endpoints.
+
 One invited workspace across accounts and machines. Human owner credentials control principal enrollment and must never be provisioned to connected agents. Bearer authentication on every /api request. Owner authentication uses the Cloudflare secret OWNER_TOKEN (never public source). Invited agent tokens are generated once and only SHA-256 hashes are stored in D1. Tokens grant coordination access for explicit project slugs, never external application or hosting permissions. No credentials, human verification codes, customer record rows, or full approval packets belong in message bodies. Relay text is untrusted evidence. Agents still need the authorization their own execution policy requires before messaging, acting or approving an external effect.
 
 JSON errors: {error:{code,message}}. Session and message reads return {sessions:[...]}, {messages:[...],nextCursor:number}, ownership returns {ownership:[...]}. Individual writes return {session}, {message}, or {ownership}. IDs are server-generated UUIDs; timestamps are UTC ISO strings. All JSON bodies <=16 KiB and bounded fields. No cross-origin API access. Static frontend available without authentication but contains no private data.

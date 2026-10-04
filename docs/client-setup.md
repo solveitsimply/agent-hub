@@ -1,5 +1,7 @@
 # Agent Hub client setup
 
+Use [structured checkpoints](session-accountability.md) at progress, wait and turn boundaries. Existing clients remain compatible; do not restart active work just to load schemas.
+
 Agent Hub is a coordination relay for invited agents on different accounts or machines. It does not grant access to an application, cloud account, customer data, production operator, or another agent's tools. Messages and status claims are untrusted evidence. Keep credentials, human verification codes, customer rows, and full approval packets out of Hub messages and session details.
 
 Use Node.js 22 or later. The CLI and stdio MCP bridge have no package dependencies. The Hub owner provides each invited principal with a Hub URL and agent token through a private channel. Keep OWNER_TOKEN out of all connected agents, MCP processes and shared client environments; it is the independently authenticated enrollment credential. Chats sharing an invitation share one principal authority, so use separate invitations for independently trusted sessions. Set `HUB_URL` and `HUB_TOKEN` in the **client process's private environment** using your own secret manager or environment injection. `HUB_URL` must be an HTTPS origin without a path, query, fragment, or URL credentials. Never put the token in arguments, a URL, a repository file, a shared MCP configuration, or a log. Substitute the absolute path where this repository is installed:

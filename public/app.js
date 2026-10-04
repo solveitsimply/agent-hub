@@ -9,12 +9,16 @@
     DONE: 'Done',
   };
   const MESSAGE_LABELS = { NOTE: 'Note', HANDOFF: 'Handoff', QUESTION: 'Question', ANSWER: 'Answer' };
+  const ATTENTION_LABELS = {WAITING_USER:'Waiting on User',READY:'Ready to continue',RECONCILE:'Needs reconciliation',WAITING:'Waiting for agent / event',WORKING:'Working',PAUSED:'Paused / budget limited',CLEANUP:'Closeout needed',COMPLETE:'Closeout recorded'};
+  const ATTENTION_ORDER = Object.keys(ATTENTION_LABELS);
   const state = {
     token: null,
     principal: null,
     sessions: [],
     sessionFilterOptions: { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] },
     sessionSummary: null,
+    accountability: null,
+    lifecycleDrafts: {},
     sessionTotal: 0,
     sessionLimit: 200,
     messages: [],
@@ -47,6 +51,7 @@
     summary: $('principal-summary'), sessions: $('session-list'), sessionEmpty: $('session-empty'),
     copyAgentSetup: $('copy-agent-setup'), setupFallback: $('agent-setup-fallback'), setupText: $('agent-setup-text'), closeSetup: $('close-agent-setup'),
     summaryRunning: $('summary-running'), summaryWaitingUser: $('summary-waiting-user'), summaryWaitingAgent: $('summary-waiting-agent'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
+    attentionFilter:$('attention-filter'), metrics:$('accountability-metrics'), observerCredential:$('observer-credential'), observerValue:$('observer-credential-value'),
     projectFilter: $('project-filter'), agentNameFilter: $('agent-name-filter'), agentModelFilter: $('agent-model-filter'),
     machineFilter: $('machine-filter'), branchFilter: $('branch-filter'), environmentFilter: $('environment-filter'), statusFilter: $('status-filter'), staleFilter: $('stale-filter'), sessionCount: $('session-count'),
     detail: $('session-detail'), detailTitle: $('detail-title'), detailStatus: $('detail-status'), detailContent: $('detail-content'),
@@ -255,7 +260,8 @@
     return (!visibleProject() || session.project === visibleProject()) &&
       (el.statusFilter.value === 'ALL' || session.status === el.statusFilter.value ||
         (el.statusFilter.value === 'WAITING' && (session.status === 'WAITING_ON_USER' || session.status === 'WAITING_ON_AGENT'))) &&
-      (!el.staleFilter.checked || (session.stale === true && session.status !== 'DONE'));
+      (!el.staleFilter.checked || (session.stale === true && session.status !== 'DONE')) &&
+      (!el.attentionFilter.value || session.lifecycle?.attention === el.attentionFilter.value);
   }
 
   function sessionQuery() {
@@ -278,6 +284,7 @@
     }
     if (el.statusFilter.value !== 'ALL') query.set('status', el.statusFilter.value);
     if (el.staleFilter.checked) query.set('staleOnly', '1');
+    if (el.attentionFilter.value) query.set('attention',el.attentionFilter.value);
     const serialized = query.toString();
     return serialized ? `?${serialized}` : '';
   }
@@ -288,6 +295,12 @@
       $('count-' + id).textContent = String(summary?.[status] ?? state.sessions.filter(item => item.status === status).length);
     }
     $('count-stale').textContent = String(summary?.stale ?? state.sessions.filter(item => item.stale && item.status !== 'DONE').length);
+    for(const [id,category] of [['ready','READY'],['reconcile','RECONCILE'],['cleanup','CLEANUP']]) {
+      $('count-'+id).textContent=String(state.accountability?.categories?.[category]??0);
+      $('summary-'+id).setAttribute('aria-pressed',String(el.attentionFilter.value===category));
+    }
+    const a=state.accountability;
+    el.metrics.textContent=a ? `${a.unaccounted} unfinished session${a.unaccounted===1?' needs':'s need'} follow-up · ${a.unaccountedClaims} held claims · next-action reports ${a.checkpointCoverage}/${a.total} · native observation ${a.observerCoverage}/${a.total}${a.oldestUnaccountedAt ? ' · oldest '+formatTime(a.oldestUnaccountedAt):''}` : '';
   }
 
   function renderSessions() {
@@ -297,6 +310,7 @@
     el.summaryStale.setAttribute('aria-pressed', String(el.staleFilter.checked));
     clear(el.sessions);
     const sessions = state.sessions.filter(sessionMatches).sort((a, b) => {
+      if(a.lifecycle && b.lifecycle) return ATTENTION_ORDER.indexOf(a.lifecycle.attention)-ATTENTION_ORDER.indexOf(b.lifecycle.attention) || String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || ''));
       const statusOrder = { WAITING_ON_USER: 0, WAITING_ON_AGENT: 1, BLOCKED: 2, RUNNING: 3, DONE: 4 };
       return (statusOrder[a.status] ?? 5) - (statusOrder[b.status] ?? 5) || String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || ''));
     });
@@ -307,7 +321,7 @@
       : `${sessions.length} sessions shown after status and stale filters.`;
     el.sessionEmpty.hidden = sessions.length !== 0;
     for (const session of sessions) {
-      const card = node('button', `session-card${session.status === 'WAITING_ON_USER' ? ' needs-user' : ''}${session.id === state.selectedSessionId ? ' is-selected' : ''}`);
+      const card = node('button', `session-card${session.status === 'WAITING_ON_USER' || session.lifecycle?.attention==='WAITING_USER' ? ' needs-user' : ''}${session.id === state.selectedSessionId ? ' is-selected' : ''}`);
       card.type = 'button';
       card.setAttribute('aria-pressed', String(session.id === state.selectedSessionId));
       const top = node('div', 'session-card-top');
@@ -326,6 +340,13 @@
         stale.title = 'No Hub update for more than three minutes; work may still be running or waiting.';
         card.append(top, title, task, labels, meta, stale);
       } else card.append(top, title, task, labels, meta);
+      if(session.lifecycle){
+        const life=session.lifecycle;
+        card.append(node('span',`attention-label attention-${life.attention.toLowerCase()}`,ATTENTION_LABELS[life.attention]));
+        card.append(node('span','session-next-action',life.checkpoint?.wait?.reason || life.checkpoint?.nextAction || life.reason));
+        if(life.checkpoint?.waitStartedAt)card.append(node('span','muted small','Waiting since '+formatTime(life.checkpoint.waitStartedAt)));
+        card.append(node('span','muted small',`Native coverage: ${life.coverage.replaceAll('_',' ')}${life.checkpoint?.nextCheckAt ? ' · next check '+formatTime(life.checkpoint.nextCheckAt):''}`));
+      }
       card.addEventListener('click', () => selectSession(session.id));
       el.sessions.append(card);
     }
@@ -360,6 +381,8 @@
 
   function renderSessionDetail() {
     const session = selectedSession();
+    if(session && el.detail.dataset.sessionId===session.id && document.activeElement?.closest('.checkpoint-form, .closeout-form'))return;
+    el.detail.dataset.sessionId=session?.id??'';
     el.detail.hidden = !session;
     el.archiveSession.hidden = !(session && ownsSession(session) && session.status === 'DONE' && !session.archivedAt);
     attributionPanel.panel.hidden = !session;
@@ -383,9 +406,77 @@
       ['Reported machine', session.reportedMachine], ['Last Hub update', formatTime(session.lastSeenAt)],
     ]) addDetailRow(list, label, value);
     el.detailContent.append(list);
+    renderLifecycle(session);
     renderEvidence(session.details || {});
     renderAttribution();
     renderClaims();
+  }
+
+  function renderLifecycle(session) {
+    const life=session.lifecycle;if(!life)return;
+    const panel=node('section','subpanel lifecycle-panel');panel.id='lifecycle-panel';
+    panel.append(node('h3','',ATTENTION_LABELS[life.attention]),node('p','',life.reason));
+    const fields=node('dl','detail-list');
+    for(const [label,value] of [['Outcome',life.checkpoint?.outcome],['Acceptance criteria',life.checkpoint?.acceptanceCriteria],['Next action',life.checkpoint?.nextAction],['Waiting for',life.checkpoint?.wait?.reason],['Waiting since',life.checkpoint?.waitStartedAt?formatTime(life.checkpoint.waitStartedAt):null],['Next check',life.checkpoint?.nextCheckAt?formatTime(life.checkpoint.nextCheckAt):null],['Progress reported',life.checkpoint?.lastProgressAt?formatTime(life.checkpoint.lastProgressAt):null],['Checkpoint received',life.checkpointAt?formatTime(life.checkpointAt):null],['Native state',life.observation?.state],['Native observed',life.observation?.observedAt?formatTime(life.observation.observedAt):null],['Native observer',life.observation?.source],['Coverage',life.coverage.replaceAll('_',' ')],['Check-in',life.checkIn?.state],['Continuation',life.continuation.reason]])addDetailRow(fields,label,value);
+    panel.append(fields);
+    if(life.dependency){const button=node('button','button button-quiet button-small','View dependency');button.type='button';button.addEventListener('click',()=>selectSession(life.dependency.sessionId));panel.append(button);}
+    const isCodex=session.externalId?.startsWith('codex:') || session.latestAttribution?.client==='Codex';
+    const nativeId=life.observation?.nativeId || (isCodex ? session.externalId?.replace(/^codex:/,'') : null);
+    if(isCodex && nativeId && /^[a-zA-Z0-9_-]{1,160}$/.test(nativeId)){
+      const link=node('a','button button-secondary button-small','Open native chat');link.href='codex://threads/'+encodeURIComponent(nativeId);panel.append(link);
+    }
+    const control=async(button,path,body,method='POST',saved)=>{button.disabled=true;try{await request(path,{method,body:JSON.stringify(body)});saved?.();await refresh({quiet:true});}catch(error){if(!(error instanceof StaleRequestError))toast(error.message,'error');}finally{button.disabled=false;}};
+    if(isOwner()){
+      const actions=node('div','lifecycle-actions');
+      const check=node('button','button button-secondary button-small','Send one check-in');check.type='button';check.disabled=!life.canCheckIn;
+      check.addEventListener('click',()=>control(check,`/sessions/${session.id}/check-in`,{expectedRevision:life.revision}));actions.append(check);
+      const policy=node('label','check-label'),toggle=node('input');toggle.type='checkbox';toggle.checked=Boolean(life.policy.checkInEnabled);
+      toggle.addEventListener('change',()=>control(toggle,`/sessions/${session.id}/accountability-policy`,{checkInEnabled:toggle.checked}));
+      policy.append(toggle,node('span','','Automatically check in on this session (at most once/day)'));actions.append(policy);
+      actions.append(node('p','muted small','Check-ins use the Hub inbox; they do not wake a disconnected native chat. Active execution, human decisions, pauses and offline observers suppress check-ins.'));
+      if(!life.observation || life.coverage==='revoked'){
+        const connect=node('button','button button-quiet button-small','Connect read-only native observer');connect.type='button';connect.disabled=!nativeId;
+        connect.addEventListener('click',async()=>{
+          connect.disabled=true;try{const value=await request('/observers',{method:'POST',body:JSON.stringify({name:'Native state observer',sessions:[{sessionId:session.id,nativeId}],expiresInDays:7})});
+            el.observerValue.value=JSON.stringify({hubUrl:location.origin,observerId:value.observer.id,observerToken:value.token,expiresAt:value.observer.expiresAt,sessions:value.observer.sessions},null,2);el.observerCredential.hidden=false;await refresh({quiet:true});
+          }catch(error){if(!(error instanceof StaleRequestError))toast(error.message,'error');}finally{connect.disabled=false;}
+        });actions.append(connect);
+      } else {const revoke=node('button','button button-quiet button-small','Disconnect native observer');revoke.type='button';revoke.addEventListener('click',()=>control(revoke,`/observers/${life.observation.observerId}`,{},'DELETE'));actions.append(revoke);}
+      panel.append(actions);
+    }
+    if(ownsSession(session) && session.status!=='DONE'){
+      const form=node('form','stack-form checkpoint-form');form.append(node('h4','','Record a checkpoint'));
+      const inputs={};
+      const draft=state.lifecycleDrafts[session.id];
+      for(const [key,label,max] of [['outcome','Outcome',1000],['acceptanceCriteria','Acceptance criteria',1500],['nextAction','Next action',1000],['waitReason','Waiting reason',1000],['nextCheckAt','Next check',36],['pauseReason','Pause reason',1000]]){
+        const field=node('input');field.id='checkpoint-'+key;field.maxLength=max;field.required=['outcome','acceptanceCriteria'].includes(key);field.value=key==='waitReason'?life.checkpoint?.wait?.reason??'':life.checkpoint?.[key]??'';
+        if(key==='nextCheckAt'){const initial=field.value;field.type='datetime-local';if(initial){const date=new Date(initial);field.value=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);}}
+        if(draft?.fields?.[key]!==undefined)field.value=draft.fields[key];
+        const labelNode=node('label','',label);labelNode.htmlFor=field.id;form.append(labelNode,field);inputs[key]=field;
+      }
+      const waitKind=node('select');waitKind.id='checkpoint-waitKind';option(waitKind,'','Executable next action');for(const kind of ['user','agent','external','scheduled'])option(waitKind,kind,kind);waitKind.value=life.checkpoint?.wait?.kind??'';const waitLabel=node('label','','Waiting for');waitLabel.htmlFor=waitKind.id;form.append(waitLabel,waitKind);
+      if(draft?.fields?.waitKind!==undefined)waitKind.value=draft.fields.waitKind;
+      const recordDraft=()=>{state.lifecycleDrafts[session.id]={revision:draft?.revision??life.revision,fields:{...Object.fromEntries(Object.entries(inputs).map(([key,value])=>[key,value.value])),waitKind:waitKind.value}};};form.addEventListener('input',recordDraft);form.addEventListener('change',recordDraft);
+      const submit=node('button','button button-secondary','Save checkpoint');submit.type='submit';form.append(submit);
+      form.addEventListener('submit',event=>{event.preventDefault();const checkpoint={outcome:inputs.outcome.value,acceptanceCriteria:inputs.acceptanceCriteria.value,nextAction:inputs.nextAction.value||null};for(const key of ['lastProgressAt','completionEvidence','presenceIntervalSeconds'])if(life.checkpoint?.[key]!==undefined)checkpoint[key]=life.checkpoint[key];if(inputs.nextCheckAt.value)checkpoint.nextCheckAt=new Date(inputs.nextCheckAt.value).toISOString();if(inputs.pauseReason.value)checkpoint.pauseReason=inputs.pauseReason.value;if(waitKind.value)checkpoint.wait={...(life.checkpoint?.wait?.kind===waitKind.value?life.checkpoint.wait:{}),kind:waitKind.value,reason:inputs.waitReason.value};control(submit,`/sessions/${session.id}/checkpoint`,{expectedRevision:state.lifecycleDrafts[session.id]?.revision??life.revision,checkpoint},'PUT',()=>{delete state.lifecycleDrafts[session.id];el.detail.dataset.sessionId='';});});panel.append(form);
+    }
+    if(session.status==='DONE'){
+      const list=node('dl','detail-list');for(const key of ['objective','workspace','nativeChat'])addDetailRow(list,humanizeKey(key),life.closeout?.[key] ? `${life.closeout[key].state}: ${life.closeout[key].evidence}${life.closeout[key].revisitAt?' · revisit '+life.closeout[key].revisitAt:''}`:'Not recorded');addDetailRow(list,'Claims',String(life.heldClaims));panel.append(list);
+      if(ownsSession(session)){
+        const form=node('form','stack-form closeout-form'),inputs={};form.append(node('h4','','Record verified closeout'));
+        const draftKey=session.id+':closeout',draft=state.lifecycleDrafts[draftKey];
+        for(const [key,states] of [['objective',['verified','failed']],['workspace',['complete','retained','failed','not_applicable']],['nativeChat',['archived','retained','failed','not_applicable']]]){
+          const select=node('select');for(const state of states)option(select,state,state);select.value=life.closeout?.[key]?.state??states[0];select.setAttribute('aria-label',humanizeKey(key)+' state');
+          const evidence=node('input');evidence.required=true;evidence.maxLength=1000;evidence.placeholder=humanizeKey(key)+' evidence / retained reason';evidence.setAttribute('aria-label',evidence.placeholder);evidence.value=life.closeout?.[key]?.evidence??'';
+          const revisit=node('input');revisit.maxLength=512;revisit.placeholder='Revisit trigger if retained';revisit.setAttribute('aria-label',humanizeKey(key)+' revisit trigger');revisit.value=life.closeout?.[key]?.revisitAt??'';
+          if(draft?.fields?.[key]){select.value=draft.fields[key].state;evidence.value=draft.fields[key].evidence;revisit.value=draft.fields[key].revisitAt;}
+          form.append(node('label','',humanizeKey(key)),select,evidence,revisit);inputs[key]={select,evidence,revisit};
+        }
+        const recordDraft=()=>{state.lifecycleDrafts[draftKey]={revision:draft?.revision??life.revision,fields:Object.fromEntries(Object.entries(inputs).map(([key,value])=>[key,{state:value.select.value,evidence:value.evidence.value,revisitAt:value.revisit.value}]))};};form.addEventListener('input',recordDraft);form.addEventListener('change',recordDraft);
+        const submit=node('button','button button-secondary','Save closeout');submit.type='submit';form.append(submit);form.addEventListener('submit',event=>{event.preventDefault();const body={expectedRevision:state.lifecycleDrafts[draftKey]?.revision??life.revision};for(const [key,value] of Object.entries(inputs))body[key]={state:value.select.value,evidence:value.evidence.value,...(value.select.value==='retained'?{revisitAt:value.revisit.value}:{})};control(submit,`/sessions/${session.id}/closeout`,body,'PUT',()=>{delete state.lifecycleDrafts[draftKey];el.detail.dataset.sessionId='';});});panel.append(form);
+      }
+    }
+    el.detailContent.append(panel);
   }
 
   function renderAttribution() {
@@ -696,6 +787,7 @@
         };
       }
       state.sessionSummary = sessionPayload.summary ?? null;
+      state.accountability = sessionPayload.accountability ?? null;
       state.sessionTotal = Number.isFinite(sessionPayload.total) ? sessionPayload.total : state.sessions.length;
       state.sessionLimit = Number.isFinite(sessionPayload.limit) && sessionPayload.limit > 0 ? sessionPayload.limit : 200;
       if (state.selectedSessionId && !state.sessions.some((session) => session.id === state.selectedSessionId)) {
@@ -841,6 +933,12 @@
     el.machineFilter.value = '';
     el.branchFilter.value = '';
     state.sessionSummary = null;
+    state.accountability = null;
+    state.lifecycleDrafts = {};
+    el.attentionFilter.value = '';
+    el.metrics.textContent = '';
+    el.observerValue.value = '';
+    el.observerCredential.hidden = true;
     el.statusFilter.value = 'ALL';
     el.staleFilter.checked = false;
     el.tokenValue.textContent = '';
@@ -922,6 +1020,10 @@
   el.machineFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.branchFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.statusFilter.addEventListener('change', () => { renderSessions(); refresh({ quiet: true }); });
+  el.attentionFilter.addEventListener('change',()=>{renderSummary();renderSessions();refresh({quiet:true});});
+  for(const [id,category] of [['ready','READY'],['reconcile','RECONCILE'],['cleanup','CLEANUP']])$('summary-'+id).addEventListener('click',()=>{el.attentionFilter.value=el.attentionFilter.value===category?'':category;renderSummary();renderSessions();refresh({quiet:true});});
+  $('dismiss-observer-credential').addEventListener('click',()=>{el.observerValue.value='';el.observerCredential.hidden=true;});
+  $('save-observer-credential').addEventListener('click',()=>{if(!el.observerValue.value)return;const url=URL.createObjectURL(new Blob([el.observerValue.value],{type:'application/json'})),link=node('a');link.href=url;link.download='agent-hub-observer.private.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
   el.staleFilter.addEventListener('change', () => { renderSessions(); refresh({ quiet: true }); });
   for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaitingUser, 'WAITING_ON_USER'], [el.summaryWaitingAgent, 'WAITING_ON_AGENT'], [el.summaryBlocked, 'BLOCKED']]) {
     chip.addEventListener('click', () => {

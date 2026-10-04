@@ -67,6 +67,15 @@
           <button id="summary-stale" title="No Hub update for more than three minutes. This does not prove work stopped; completed sessions are excluded." class="summary-card summary-stale" type="button" aria-pressed="false" aria-controls="stale-filter session-list"><span>Not recently seen</span><strong id="count-stale">0</strong></button>
         </section>
 
+        <section class="accountability-summary" aria-label="Session accountability">
+          <div class="accountability-chips">
+            <button id="summary-ready" class="summary-card" type="button" aria-pressed="false"><span>Ready to continue</span><strong id="count-ready">0</strong></button>
+            <button id="summary-reconcile" class="summary-card" type="button" aria-pressed="false"><span>Needs reconciliation</span><strong id="count-reconcile">0</strong></button>
+            <button id="summary-cleanup" class="summary-card" type="button" aria-pressed="false"><span>Completed · closeout needed</span><strong id="count-cleanup">0</strong></button>
+          </div>
+          <p id="accountability-metrics" class="muted small" aria-live="polite"></p>
+        </section>
+
         <section class="workspace-grid">
           <div class="main-column">
             <section class="panel section-panel" aria-labelledby="sessions-title">
@@ -110,6 +119,10 @@
                     <option value="BLOCKED">Blocked</option>
                     <option value="DONE">Done</option>
                   </select>
+                </div>
+                <div class="filter-field">
+                  <label class="filter-label" for="attention-filter">Next action</label>
+                  <select id="attention-filter"><option value="">All next actions</option><option value="WAITING_USER">Waiting on User</option><option value="READY">Ready to continue</option><option value="RECONCILE">Needs reconciliation</option><option value="WAITING">Waiting for agent / event</option><option value="WORKING">Working</option><option value="PAUSED">Paused / budget limited</option><option value="CLEANUP">Completed · closeout needed</option><option value="COMPLETE">Completed · closeout recorded</option></select>
                 </div>
                 <label class="check-filter"><input id="stale-filter" type="checkbox" /> Not recently seen</label>
               </div>
@@ -226,6 +239,13 @@
           </aside>
         </section>
         <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+        <section id="observer-credential" class="panel section-panel" hidden>
+          <h3>Read-only observer credential</h3>
+          <p class="muted small">This credential reports native state for the selected chat only. It cannot read messages, change status, resume or archive a chat. Save it to your private installation; it is shown once.</p>
+          <textarea id="observer-credential-value" rows="5" readonly aria-label="Observer credential configuration"></textarea>
+          <button id="save-observer-credential" class="button button-secondary" type="button">Save private observer configuration</button>
+          <button id="dismiss-observer-credential" class="button button-quiet" type="button">Dismiss</button>
+        </section>
       </section>
     </main>
     <footer class="page-footer">Enrollment grants coordination access only. Verify claims through the relevant source of truth.</footer>

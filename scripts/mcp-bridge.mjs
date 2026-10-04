@@ -19,6 +19,22 @@ const workContext = { ...schema({repository:string, branch:{type:['string','null
 
 const tools = [
   {
+    name:'hub_record_checkpoint',
+    description:`Record an accountable next action for this owned session, at meaningful progress, wait and turn boundaries. Read its lifecycle revision first; a stale revision is rejected. Supply outcome, acceptanceCriteria and nextAction or a specific wait with nextCheckAt. lastProgressAt is an agent-reported claim. Never infer completion from an ended turn. ${COORDINATION_NOTICE}`,
+    inputSchema:schema({sessionId:string,expectedRevision:nonnegativeInteger,checkpoint:{type:'object',description:'outcome, acceptanceCriteria; nextAction; lastProgressAt/nextCheckAt UTC; wait {kind:user|agent|external|scheduled,reason,sessionId?,messageId?,runId?,expectedEvent?}; pauseReason; completionEvidence refs; presenceIntervalSeconds only for a client with a real periodic contract.'}},['sessionId','expectedRevision','checkpoint']),
+    async invoke(client,{sessionId,...body}){return client.request('PUT',`/api/sessions/${encodeURIComponent(sessionId)}/checkpoint`,{body});},
+  },
+  {
+    name:'hub_read_lifecycle',description:`Read checkpoint, independent native observation, check-in and closeout evidence. Coverage missing/offline does not establish stopped execution. ${COORDINATION_NOTICE}`,
+    inputSchema:schema({sessionId:string},['sessionId']),
+    async invoke(client,{sessionId}){return client.request('GET',`/api/sessions/${encodeURIComponent(sessionId)}/checkpoint`);},
+  },
+  {
+    name:'hub_record_closeout',description:`Record separate objective, local workspace and native chat closeout for this owned DONE session. Claims are checked from current custody. Retained work needs a reason and revisit trigger. This tool deletes nothing and archives no native chat. ${COORDINATION_NOTICE}`,
+    inputSchema:schema({sessionId:string,expectedRevision:nonnegativeInteger,objective:details,workspace:details,nativeChat:details},['sessionId','expectedRevision','objective','workspace','nativeChat']),
+    async invoke(client,{sessionId,...body}){return client.request('PUT',`/api/sessions/${encodeURIComponent(sessionId)}/closeout`,{body});},
+  },
+  {
     name: 'hub_capture_context',
     description: `Read actual hostname and sanitized origin/repository, branch and full commit from an explicit checkout. No Hub write. Target environment must be chosen separately. ${COORDINATION_NOTICE}`,
     inputSchema: schema({ workingDirectory:string }, ['workingDirectory']),
@@ -47,10 +63,10 @@ const tools = [
   {
     name: 'hub_register_session',
     description: `Register this external agent session. Omit machine to capture the actual hostname; preserve an explicit legacy label on retries. Supply workContext from the actual checkout, and environment only for the target app instance. Use the exact in-app chat title for label when available, otherwise a concise actual-task label. Keep the app-namespaced externalId stable across renames; report provider/client/model/account/key labels in attribution segments. Server assigns the principal/account role; these fields cannot impersonate another account. ${COORDINATION_NOTICE}`,
-    inputSchema: schema({ externalId: string, machine: string, label: sessionLabel, project: string, task: string, status: { type: 'string', enum: ['RUNNING', 'WAITING_ON_USER', 'WAITING_ON_AGENT', 'BLOCKED', 'DONE'] }, environment, workContext, details }, ['externalId', 'label', 'project', 'task', 'status']),
+    inputSchema: schema({ externalId: string, machine: string, label: sessionLabel, project: string, task: string, status: { type: 'string', enum: ['RUNNING', 'WAITING_ON_USER', 'WAITING_ON_AGENT', 'BLOCKED', 'DONE'] }, environment, workContext, details,checkpoint:{type:'object',description:'Optional structured next-action checkpoint; see hub_record_checkpoint.'} }, ['externalId', 'label', 'project', 'task', 'status']),
     async invoke(client, args) {
-      const { externalId, machine, label, project, task, status, environment, workContext, details } = args;
-      return client.request('POST', '/api/sessions', { body: { externalId, machine: machine ?? hostname(), label, project, task, status, environment, workContext, details } });
+      const { externalId, machine, label, project, task, status, environment, workContext, details,checkpoint } = args;
+      return client.request('POST', '/api/sessions', { body: { externalId, machine: machine ?? hostname(), label, project, task, status, environment, workContext, details,checkpoint } });
     },
   },
   {

@@ -13,6 +13,7 @@ particular repository, agent provider, organization or AWS account.
 
 - Register each actual chat separately and retain its in-app name.
 - Track heartbeats and running, waiting, blocked and completed states.
+- Track structured next-action checkpoints, independent native presence, opt-in inbox check-ins and verified closeout. See [session accountability](docs/session-accountability.md).
 - Exchange messages automatically between enrolled agents, with retry-safe delivery and receipt acknowledgment.
 - Claim project-scoped coordination ownership without silently stealing stale claims.
 - Filter by agent app, model and execution environment.
