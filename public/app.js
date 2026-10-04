@@ -311,10 +311,11 @@
     const blocked = session.status === 'BLOCKED';
     const kind = wait?.kind || (session.status === 'WAITING_ON_USER' || life?.attention === 'WAITING_USER' ? 'user' : session.status === 'WAITING_ON_AGENT' ? 'agent' : null);
     if (!blocked && !kind) return null;
-    const labels = { user: 'Waiting on user', agent: 'Waiting on agent', external: 'Waiting on external event', scheduled: 'Waiting for scheduled check' };
+    const labels = { user: 'Needs from user', agent: 'Waiting for', external: 'External prerequisite', scheduled: 'Scheduled event' };
     const summary = node('span', `session-wait-summary${blocked ? ' session-wait-blocked' : ''}`);
-    summary.append(node('strong', 'session-wait-heading', blocked ? `Blocked${kind ? ' · ' + labels[kind].toLowerCase() : ''}` : labels[kind]));
+    summary.append(node('strong', 'session-wait-heading', labels[kind] || 'Blocking prerequisite'));
     const reason = wait?.reason || (blocked ? checkpoint?.pauseReason : null);
+    const reported = new Set(reason ? [reason.trim()] : []);
     summary.append(node('span', reason ? 'session-wait-reason' : 'session-wait-missing', reason || (blocked ? 'Blocker not reported. This session needs to explain what prevents progress.' : kind === 'user' ? 'Requested user decision or action not reported.' : 'Specific waiting reason not reported.')));
     if (kind === 'agent') {
       if (wait?.sessionId) {
@@ -326,10 +327,14 @@
         if (dependency?.status) summary.append(node('span', 'session-wait-context', `Dependency reports: ${STATUS_LABELS[dependency.status] || dependency.status}${dependency.status === 'DONE' ? ' — verify its completion evidence' : ''}`));
       } else summary.append(node('span', 'session-wait-missing', 'Agent not identified. No other session has been linked.'));
     }
-    if (wait?.expectedEvent) summary.append(node('span', 'session-wait-event', `Needed to continue: ${wait.expectedEvent}`));
+    if (wait?.expectedEvent && !reported.has(wait.expectedEvent.trim())) {
+      summary.append(node('span', 'session-wait-event', `Needed to continue: ${wait.expectedEvent}`));
+      reported.add(wait.expectedEvent.trim());
+    }
     if (checkpoint?.nextCheckAt) summary.append(node('span', 'session-wait-context', `Next check: ${formatTime(checkpoint.nextCheckAt)}${life?.overdue ? ' · Overdue' : ''}`));
     else summary.append(node('span', 'session-wait-missing', 'Next check not reported.'));
-    summary.append(node('span', checkpoint?.nextAction ? 'session-wait-action' : 'session-wait-missing', checkpoint?.nextAction ? `Next action: ${checkpoint.nextAction}` : 'Next action not reported.'));
+    if (!checkpoint?.nextAction) summary.append(node('span', 'session-wait-missing', 'Next action not reported.'));
+    else if (!reported.has(checkpoint.nextAction.trim())) summary.append(node('span', 'session-wait-action', `Next action: ${checkpoint.nextAction}`));
     return summary;
   }
 
@@ -360,6 +365,9 @@
       const title = node('strong', 'session-title', session.label || 'Session title not set');
       const waitSummary = sessionWaitSummary(session);
       const task = node('span', 'session-task', `Task: ${session.task || 'No task description'}`);
+      const checkpoint = session.lifecycle?.checkpoint;
+      const displayedTaskValues = waitSummary ? [checkpoint?.wait?.reason || (session.status === 'BLOCKED' ? checkpoint?.pauseReason : null), checkpoint?.wait?.expectedEvent, checkpoint?.nextAction] : [checkpoint?.nextAction || session.lifecycle?.reason];
+      const taskRepeated = Boolean(session.task && displayedTaskValues.some(value => value?.trim() === session.task.trim()));
       const labels = node('span', 'session-labels');
       labels.append(
         node('span', 'session-origin', `Machine: ${session.machine || 'Unknown'}`),
@@ -369,7 +377,8 @@
       if (session.workContext) labels.append(node('span', 'session-origin', `${session.workContext.repository} · ${session.workContext.branch || 'Detached'}${session.workContext.commit ? ' · ' + session.workContext.commit.slice(0, 8) : ''}`));
       card.append(top, title);
       if (waitSummary) card.append(waitSummary);
-      card.append(task, labels, meta);
+      if (!taskRepeated) card.append(task);
+      card.append(labels, meta);
       if (session.stale && session.status !== 'DONE') {
         const stale = node('span', 'stale-chip', 'Not recently seen');
         stale.title = 'No Hub update for more than three minutes; work may still be running or waiting.';
@@ -377,7 +386,8 @@
       }
       if(session.lifecycle){
         const life=session.lifecycle;
-        card.append(node('span',`attention-label attention-${life.attention.toLowerCase()}`,ATTENTION_LABELS[life.attention]));
+        const attentionRepeated = (waitSummary && ['WAITING_USER', 'WAITING', 'RECONCILE'].includes(life.attention)) || (session.status === 'RUNNING' && life.attention === 'WORKING');
+        if (!attentionRepeated) card.append(node('span',`attention-label attention-${life.attention.toLowerCase()}`,ATTENTION_LABELS[life.attention]));
         if (!waitSummary) card.append(node('span','session-next-action',life.checkpoint?.nextAction || life.reason));
         if(life.checkpoint?.waitStartedAt)card.append(node('span','muted small','Waiting since '+formatTime(life.checkpoint.waitStartedAt)));
         card.append(node('span','muted small',`Native coverage: ${life.coverage.replaceAll('_',' ')}${!waitSummary && life.checkpoint?.nextCheckAt ? ' · next check '+formatTime(life.checkpoint.nextCheckAt):''}`));
