@@ -13,7 +13,8 @@
     token: null,
     principal: null,
     sessions: [],
-    sessionFilterOptions: { agentNames: [], agentModels: [], machines: [] },
+    sessionFilterOptions: { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] },
+    sessionSummary: null,
     sessionTotal: 0,
     sessionLimit: 200,
     messages: [],
@@ -45,9 +46,9 @@
     workspace: $('workspace'), connection: $('connection-state'), refresh: $('refresh-button'), logout: $('logout-button'),
     summary: $('principal-summary'), sessions: $('session-list'), sessionEmpty: $('session-empty'),
     copyAgentSetup: $('copy-agent-setup'), setupFallback: $('agent-setup-fallback'), setupText: $('agent-setup-text'), closeSetup: $('close-agent-setup'),
-    summaryRunning: $('summary-running'), summaryWaiting: $('summary-waiting'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
+    summaryRunning: $('summary-running'), summaryWaitingUser: $('summary-waiting-user'), summaryWaitingAgent: $('summary-waiting-agent'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
     projectFilter: $('project-filter'), agentNameFilter: $('agent-name-filter'), agentModelFilter: $('agent-model-filter'),
-    environmentFilter: $('environment-filter'), statusFilter: $('status-filter'), staleFilter: $('stale-filter'), sessionCount: $('session-count'),
+    machineFilter: $('machine-filter'), branchFilter: $('branch-filter'), environmentFilter: $('environment-filter'), statusFilter: $('status-filter'), staleFilter: $('stale-filter'), sessionCount: $('session-count'),
     detail: $('session-detail'), detailTitle: $('detail-title'), detailStatus: $('detail-status'), detailContent: $('detail-content'),
     releaseDetails: $('release-details'), claims: $('claims-list'), claimForm: $('claim-form'), claimResource: $('claim-resource'), releaseEnteredClaim: $('release-entered-claim'), claimMessage: $('claim-message'), archiveSession: $('archive-session-button'),
     messageFilter: $('message-type-filter'), messageScope: $('message-scope'), messageList: $('message-list'), messageEmpty: $('message-empty'), messageCount: $('message-count'),
@@ -186,7 +187,9 @@
     }
     renderAttributionFilter(el.agentNameFilter, state.sessionFilterOptions.agentNames, 'All agent names');
     renderAttributionFilter(el.agentModelFilter, state.sessionFilterOptions.agentModels, 'All agent models');
-    renderAttributionFilter(el.environmentFilter, state.sessionFilterOptions.machines, 'All environments');
+    renderAttributionFilter(el.machineFilter, state.sessionFilterOptions.machines, 'All machines');
+    renderAttributionFilter(el.environmentFilter, state.sessionFilterOptions.environments, 'All environments');
+    renderBranchFilter();
     el.manualProjectWrap.hidden = !isOwner() || el.messageProject.value !== '__manual__';
 
     const ownSessions = state.sessions.filter((session) => ownsSession(session));
@@ -226,6 +229,21 @@
     if ([...select.options].some((item) => item.value === current)) select.value = current;
   }
 
+  function renderBranchFilter() {
+    const current = el.branchFilter.value;
+    clear(el.branchFilter);
+    option(el.branchFilter, '', 'All branches');
+    option(el.branchFilter, 'unknown:', 'Unknown / detached');
+    const contexts = state.sessionFilterOptions.branches.filter(item => item?.repository && item?.branch)
+      .sort((a,b) => `${a.repository} · ${a.branch}`.localeCompare(`${b.repository} · ${b.branch}`));
+    for (const context of contexts) option(el.branchFilter, JSON.stringify(context), `${context.repository} · ${context.branch}`);
+    if (current && current !== 'unknown:' && !contexts.some(item => JSON.stringify(item) === current)) {
+      const context = JSON.parse(current);
+      option(el.branchFilter, current, `${context.repository} · ${context.branch}`);
+    }
+    el.branchFilter.value = current;
+  }
+
   function statusBadge(status, stale = false) {
     const safeStatusClass = Object.hasOwn(STATUS_LABELS, status) ? String(status).toLowerCase() : 'unknown';
     const badge = node('span', `status-badge status-${safeStatusClass}`, STATUS_LABELS[status] || status || 'Unknown');
@@ -237,7 +255,7 @@
     return (!visibleProject() || session.project === visibleProject()) &&
       (el.statusFilter.value === 'ALL' || session.status === el.statusFilter.value ||
         (el.statusFilter.value === 'WAITING' && (session.status === 'WAITING_ON_USER' || session.status === 'WAITING_ON_AGENT'))) &&
-      (!el.staleFilter.checked || session.stale === true);
+      (!el.staleFilter.checked || (session.stale === true && session.status !== 'DONE'));
   }
 
   function sessionQuery() {
@@ -246,26 +264,34 @@
     for (const [select, name, unknownName] of [
       [el.agentNameFilter, 'agentName', 'agentNameUnknown'],
       [el.agentModelFilter, 'agentModel', 'agentModelUnknown'],
-      [el.environmentFilter, 'machine', 'machineUnknown'],
+      [el.machineFilter, 'machine', 'machineUnknown'],
+      [el.environmentFilter, 'environment', 'environmentUnknown'],
     ]) {
       const selected = select.value;
       if (selected === 'unknown:') query.set(unknownName, '1');
       else if (selected.startsWith('value:')) query.set(name, selected.slice('value:'.length));
     }
+    if (el.branchFilter.value === 'unknown:') query.set('branchUnknown', '1');
+    else if (el.branchFilter.value) {
+      const context = JSON.parse(el.branchFilter.value);
+      query.set('repository', context.repository); query.set('branch', context.branch);
+    }
+    if (el.statusFilter.value !== 'ALL') query.set('status', el.statusFilter.value);
+    if (el.staleFilter.checked) query.set('staleOnly', '1');
     const serialized = query.toString();
     return serialized ? `?${serialized}` : '';
   }
 
   function renderSummary() {
-    const sessions = state.sessions;
-    $('count-running').textContent = String(sessions.filter((item) => item.status === 'RUNNING').length);
-    $('count-waiting').textContent = String(sessions.filter((item) => item.status === 'WAITING_ON_USER' || item.status === 'WAITING_ON_AGENT').length);
-    $('count-blocked').textContent = String(sessions.filter((item) => item.status === 'BLOCKED').length);
-    $('count-stale').textContent = String(sessions.filter((item) => item.stale).length);
+    const summary = state.sessionSummary;
+    for (const [id, status] of [['running','RUNNING'], ['waiting-user','WAITING_ON_USER'], ['waiting-agent','WAITING_ON_AGENT'], ['blocked','BLOCKED']]) {
+      $('count-' + id).textContent = String(summary?.[status] ?? state.sessions.filter(item => item.status === status).length);
+    }
+    $('count-stale').textContent = String(summary?.stale ?? state.sessions.filter(item => item.stale && item.status !== 'DONE').length);
   }
 
   function renderSessions() {
-    for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaiting, 'WAITING'], [el.summaryBlocked, 'BLOCKED']]) {
+    for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaitingUser, 'WAITING_ON_USER'], [el.summaryWaitingAgent, 'WAITING_ON_AGENT'], [el.summaryBlocked, 'BLOCKED']]) {
       chip.setAttribute('aria-pressed', String(el.statusFilter.value === status));
     }
     el.summaryStale.setAttribute('aria-pressed', String(el.staleFilter.checked));
@@ -277,11 +303,11 @@
     const isServerLimited = state.sessionTotal > state.sessionLimit;
     el.sessionCount.textContent = isServerLimited ? `${sessions.length} shown · ${state.sessionTotal} matches` : String(sessions.length);
     el.sessionCount.title = isServerLimited
-      ? `${state.sessionTotal} sessions match the selected project and attribution filters; only ${state.sessionLimit} were returned before status and stale filters.`
+      ? `${state.sessionTotal} sessions match the selected project and attribution filters; only ${state.sessionLimit} were returned after all selected filters.`
       : `${sessions.length} sessions shown after status and stale filters.`;
     el.sessionEmpty.hidden = sessions.length !== 0;
     for (const session of sessions) {
-      const card = node('button', `session-card${session.id === state.selectedSessionId ? ' is-selected' : ''}`);
+      const card = node('button', `session-card${session.status === 'WAITING_ON_USER' ? ' needs-user' : ''}${session.id === state.selectedSessionId ? ' is-selected' : ''}`);
       card.type = 'button';
       card.setAttribute('aria-pressed', String(session.id === state.selectedSessionId));
       const top = node('div', 'session-card-top');
@@ -293,9 +319,11 @@
         node('span', 'session-origin', `Machine: ${session.machine || 'Unknown'}`),
         node('span', 'session-origin', `Account: ${session.account || session.principalName || 'Unknown'}`),
       );
-      const meta = node('span', 'session-meta', `${session.environment || 'Environment unspecified'} · seen ${formatTime(session.lastSeenAt)}`);
-      if (session.stale) {
-        const stale = node('span', 'stale-chip', 'Stale heartbeat');
+      const meta = node('span', 'session-meta', `Environment: ${session.environment || 'Unknown'} · seen ${formatTime(session.lastSeenAt)}`);
+      if (session.workContext) labels.append(node('span', 'session-origin', `${session.workContext.repository} · ${session.workContext.branch || 'Detached'}${session.workContext.commit ? ' · ' + session.workContext.commit.slice(0, 8) : ''}`));
+      if (session.stale && session.status !== 'DONE') {
+        const stale = node('span', 'stale-chip', 'Not recently seen');
+        stale.title = 'No Hub update for more than three minutes; work may still be running or waiting.';
         card.append(top, title, task, labels, meta, stale);
       } else card.append(top, title, task, labels, meta);
       card.addEventListener('click', () => selectSession(session.id));
@@ -345,13 +373,14 @@
     }
     setText(el.detailTitle, session.label || session.task || session.id);
     el.detailStatus.replaceChildren(statusBadge(session.status));
-    if (session.stale) el.detailStatus.append(node('span', 'stale-chip', 'Stale heartbeat'));
+    if (session.stale && session.status !== 'DONE') el.detailStatus.append(node('span', 'stale-chip', 'Not recently seen'));
     clear(el.detailContent);
     const list = node('dl', 'detail-list detail-grid');
     for (const [label, value] of [
       ['Task', session.task], ['Account', session.account], ['Machine', session.machine], ['Session ID', session.id],
       ['External ID', session.externalId], ['Project', session.project], ['Environment', session.environment],
-      ['Last heartbeat', formatTime(session.lastSeenAt)],
+      ['Repository', session.workContext?.repository], ['Branch', session.workContext?.branch], ['Commit', session.workContext?.commit],
+      ['Reported machine', session.reportedMachine], ['Last Hub update', formatTime(session.lastSeenAt)],
     ]) addDetailRow(list, label, value);
     el.detailContent.append(list);
     renderEvidence(session.details || {});
@@ -381,7 +410,7 @@
       item.append(heading);
       const fields = node('dl', 'attribution-fields');
       for (const [label, value] of [
-        ['Client', segment.client], ['Model', segment.model], ['Account label', segment.accountLabel], ['API key label', segment.apiKeyLabel],
+        ['Agent', segment.client], ['Interface', segment.interface], ['Reported client', segment.reportedClient], ['Model', segment.model], ['Account label', segment.accountLabel], ['API key label', segment.apiKeyLabel],
       ]) addDetailRow(fields, label, value == null || value === '' ? 'Unknown' : value);
       item.append(fields);
       const interval = node('p', 'attribution-interval');
@@ -638,7 +667,7 @@
       : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: Agent · ${projectSummary}`;
     el.ownerTools.hidden = !isOwner();
     el.reviewFilterWrap.hidden = !isOwner();
-    for (const select of [el.agentNameFilter, el.agentModelFilter]) select.disabled = !isOwner();
+    for (const select of [el.agentNameFilter, el.agentModelFilter, el.machineFilter, el.branchFilter, el.environmentFilter]) select.disabled = !isOwner();
     renderSelectors();
     renderSummary();
     renderSessions();
@@ -670,8 +699,11 @@
           agentNames: Array.isArray(filterOptions.agentNames) ? filterOptions.agentNames : [],
           agentModels: Array.isArray(filterOptions.agentModels) ? filterOptions.agentModels : [],
           machines: Array.isArray(filterOptions.machines) ? filterOptions.machines : [],
+          environments: Array.isArray(filterOptions.environments) ? filterOptions.environments : [],
+          branches: Array.isArray(filterOptions.branches) ? filterOptions.branches : [],
         };
       }
+      state.sessionSummary = sessionPayload.summary ?? null;
       state.sessionTotal = Number.isFinite(sessionPayload.total) ? sessionPayload.total : state.sessions.length;
       state.sessionLimit = Number.isFinite(sessionPayload.limit) && sessionPayload.limit > 0 ? sessionPayload.limit : 200;
       if (state.selectedSessionId && !state.sessions.some((session) => session.id === state.selectedSessionId)) {
@@ -810,7 +842,7 @@
     state.token = null;
     state.principal = null;
     state.sessions = [];
-    state.sessionFilterOptions = { agentNames: [], agentModels: [], machines: [] };
+    state.sessionFilterOptions = { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] };
     state.sessionTotal = 0;
     state.sessionLimit = 200;
     state.messages = [];
@@ -829,11 +861,16 @@
     el.agentNameFilter.value = '';
     el.agentModelFilter.value = '';
     el.environmentFilter.value = '';
+    el.machineFilter.value = '';
+    el.branchFilter.value = '';
+    state.sessionSummary = null;
     el.statusFilter.value = 'ALL';
     el.staleFilter.checked = false;
     el.tokenValue.textContent = '';
     el.tokenPanel.hidden = true;
     clear(el.sessions); clear(el.messageList); clear(el.claims); clear(el.principalList);
+    clear(el.detailContent); clear(el.releaseDetails); clear(el.detailStatus);
+    el.detailTitle.textContent = '';
     clear(attributionPanel.list);
     attributionPanel.status.textContent = 'Select a session to view its attribution history.';
     attributionPanel.more.hidden = true;
@@ -905,17 +942,21 @@
   el.agentNameFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.agentModelFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.environmentFilter.addEventListener('change', () => refresh({ quiet: true }));
-  el.statusFilter.addEventListener('change', renderSessions);
-  el.staleFilter.addEventListener('change', renderSessions);
-  for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaiting, 'WAITING'], [el.summaryBlocked, 'BLOCKED']]) {
+  el.machineFilter.addEventListener('change', () => refresh({ quiet: true }));
+  el.branchFilter.addEventListener('change', () => refresh({ quiet: true }));
+  el.statusFilter.addEventListener('change', () => { renderSessions(); refresh({ quiet: true }); });
+  el.staleFilter.addEventListener('change', () => { renderSessions(); refresh({ quiet: true }); });
+  for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaitingUser, 'WAITING_ON_USER'], [el.summaryWaitingAgent, 'WAITING_ON_AGENT'], [el.summaryBlocked, 'BLOCKED']]) {
     chip.addEventListener('click', () => {
       el.statusFilter.value = el.statusFilter.value === status ? 'ALL' : status;
       renderSessions();
+      refresh({ quiet: true });
     });
   }
   el.summaryStale.addEventListener('click', () => {
     el.staleFilter.checked = !el.staleFilter.checked;
     renderSessions();
+    refresh({ quiet: true });
   });
   el.messageFilter.addEventListener('change', async () => {
     resetMessageView();

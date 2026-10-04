@@ -4,11 +4,11 @@ import worker from '../src/worker.mjs';
 import {SqliteD1} from './d1-sqlite.mjs';
 
 const OWNER='synthetic-owner-for-local-test-only-1234567890';
-function fixture(t){
+function fixture(t,extraEnv={}){
   const DB=new SqliteD1();t.after(()=>DB.close());
   return {DB,async call(token,path,body,method=body===undefined?'GET':'POST'){
     const headers={authorization:'Bearer '+token};if(body!==undefined)headers['content-type']='application/json';
-    const response=await worker.fetch(new Request('https://hub.test'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),{DB,OWNER_TOKEN:OWNER});
+    const response=await worker.fetch(new Request('https://hub.test'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),{DB,OWNER_TOKEN:OWNER,...extraEnv});
     return {status:response.status,body:await response.json()};
   }};
 }
@@ -84,4 +84,52 @@ test('filtering and facet discovery happen before the 200-session display limit'
   assert.ok(unfiltered.body.filterOptions.agentNames.includes('Gemini'));
   const filtered=await f.call(actors[0].token,'/api/sessions?agentName=Gemini&agentModel=Gemini%20rare%20model&machine=rare-host');
   assert.equal(filtered.body.sessions.length,1);assert.equal(filtered.body.total,1);assert.equal(filtered.body.sessions[0].id,target.id);
+});
+
+
+test('machine aliases, agent interfaces and qualified Git context preserve identity and isolation',async t=>{
+  const f=fixture(t,{MACHINE_ALIASES_JSON:JSON.stringify({'Review desktop':'review-host.local','Review-host':'review-host.local'})});
+  const actor=await invite(f,'context-agent'),other=await invite(f,'other-context-agent'),privateActor=await invite(f,'private-context-agent',['private']);
+  const context={repository:'github.com/example/app',branch:'dev',commit:'a'.repeat(40)};
+  const session=await register(f,actor,{machine:'Review desktop',environment:'staging',workContext:context});
+  const foreign=await register(f,other,{workContext:{...context,repository:'github.com/example/another'}});
+  assert.equal(session.machine,'review-host.local');assert.equal(session.reportedMachine,'Review desktop');
+  assert.equal(session.environment,'staging');assert.deepEqual(session.workContext,context);
+  const retry=await f.call(actor.token,'/api/sessions',{externalId:session.externalId,machine:'Review-host',label:session.label,project:'shared',task:'Retry',status:'RUNNING'});
+  assert.equal(retry.status,200);assert.equal(retry.body.session.id,session.id);
+  assert.equal(f.DB.database.prepare('SELECT machine FROM sessions WHERE id=?').get(session.id).machine,'Review desktop');
+  const initial={provider:'Example provider',client:'Codex desktop',previousSegmentId:null,idempotencyKey:'legacy-context-attribution'};
+  const first=await f.call(actor.token,`/api/sessions/${session.id}/attribution`,initial);assert.equal(first.status,201);
+  assert.equal((await f.call(actor.token,`/api/sessions/${session.id}/attribution`,initial)).status,201,'legacy hash retry');
+  const history=await f.call(OWNER,`/api/sessions/${session.id}/attribution`);
+  assert.equal(history.body.segments[0].client,'Codex');assert.equal(history.body.segments[0].interface,'desktop');assert.equal(history.body.segments[0].reportedClient,'Codex desktop');
+  const filtered=await f.call(OWNER,'/api/sessions?agentName=Codex&machine=review-host.local&environment=staging&repository=github.com%2Fexample%2Fapp&branch=dev');
+  assert.deepEqual(filtered.body.sessions.map(s=>s.id),[session.id]);assert.equal(filtered.body.filterOptions.agentNames.includes('Codex desktop'),false);
+  assert.equal((await f.call(OWNER,'/api/sessions?agentName=Codex%20desktop')).body.total,1);
+  assert.equal((await f.call(OWNER,'/api/sessions?branch=dev')).status,422);
+  assert.equal((await f.call(OWNER,'/api/sessions?environment=Review%20desktop')).status,422);
+  const patch={details:{nativeBuildStatus:'Pending verification'},environment:'dev'};
+  assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,patch,'PATCH')).status,200);
+  assert.deepEqual((await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===session.id).workContext,context);
+  assert.equal((await f.call(other.token,`/api/sessions/${session.id}`,{workContext:null},'PATCH')).status,403);
+  assert.equal((await f.call(privateActor.token,'/api/sessions?project=shared&repository=github.com%2Fexample%2Fapp')).status,403);
+  const agentView=await f.call(actor.token,'/api/sessions');
+  assert.ok(agentView.body.sessions.every(s=>s.workContext===null&&s.reportedMachine===null&&s.machine===null));
+  assert.deepEqual(agentView.body.filterOptions.branches,[null]);assert.deepEqual(agentView.body.filterOptions.environments,[null]);
+  for(const branch of ['/invalid','bad..branch','bad.lock','bad@{name','has space'])assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,{workContext:{...context,branch}},'PATCH')).status,422);
+  assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,{workContext:{...context,repository:'https://user:secret@example.test/app?token=value'}},'PATCH')).status,422);
+  assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,{workContext:null,environment:null},'PATCH')).status,200);
+  const cleared=(await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===session.id);assert.equal(cleared.workContext,null);assert.equal(cleared.environment,null);
+  assert.notEqual(foreign.id,session.id);
+});
+
+test('status shortcuts find older sessions and full summaries exclude completed presence alerts',async t=>{
+  const f=fixture(t),actors=await Promise.all(['summary-a','summary-b','summary-c'].map(name=>invite(f,name)));
+  const waiting=await register(f,actors[0],{status:'WAITING_ON_USER'}),done=await register(f,actors[0],{status:'DONE'});
+  for(const s of [waiting,done])f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run('2026-01-01T00:00:00.000Z',s.id);
+  for(let index=0;index<201;index++)await register(f,actors[Math.floor(index/75)]);
+  const filtered=await f.call(OWNER,'/api/sessions?status=WAITING_ON_USER');
+  assert.equal(filtered.body.total,1);assert.equal(filtered.body.sessions[0].id,waiting.id);assert.equal(filtered.body.summary.RUNNING,201);assert.equal(filtered.body.summary.DONE,1);assert.equal(filtered.body.summary.stale,1);
+  const stale=await f.call(OWNER,'/api/sessions?staleOnly=1');assert.equal(stale.body.total,1);assert.equal(stale.body.sessions[0].id,waiting.id);
+  assert.equal((await f.call(OWNER,'/api/sessions?staleOnly=false')).status,422);
 });

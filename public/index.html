@@ -60,10 +60,11 @@
         </div>
 
         <section class="summary-grid" aria-label="Session status summary">
+          <button id="summary-waiting-user" class="summary-card summary-waiting-user" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Waiting on User</span><strong id="count-waiting-user">0</strong></button>
           <button id="summary-running" class="summary-card" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Running</span><strong id="count-running">0</strong></button>
-          <button id="summary-waiting" class="summary-card summary-waiting" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Waiting</span><strong id="count-waiting">0</strong></button>
+          <button id="summary-waiting-agent" class="summary-card summary-waiting" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Waiting on Agent</span><strong id="count-waiting-agent">0</strong></button>
           <button id="summary-blocked" class="summary-card summary-blocked" type="button" aria-pressed="false" aria-controls="status-filter session-list"><span>Blocked</span><strong id="count-blocked">0</strong></button>
-          <button id="summary-stale" class="summary-card summary-stale" type="button" aria-pressed="false" aria-controls="stale-filter session-list"><span>Stale heartbeat</span><strong id="count-stale">0</strong></button>
+          <button id="summary-stale" title="No Hub update for more than three minutes. This does not prove work stopped; completed sessions are excluded." class="summary-card summary-stale" type="button" aria-pressed="false" aria-controls="stale-filter session-list"><span>Not recently seen</span><strong id="count-stale">0</strong></button>
         </section>
 
         <section class="workspace-grid">
@@ -87,6 +88,14 @@
                   <select id="agent-model-filter"><option value="">All agent models</option><option value="unknown">Unknown</option></select>
                 </div>
                 <div class="filter-field">
+                  <label class="filter-label" for="machine-filter">Machine</label>
+                  <select id="machine-filter"><option value="">All machines</option><option value="unknown:">Unknown</option></select>
+                </div>
+                <div class="filter-field">
+                  <label class="filter-label" for="branch-filter">Repository / branch</label>
+                  <select id="branch-filter"><option value="">All branches</option><option value="unknown:">Unknown</option></select>
+                </div>
+                <div class="filter-field">
                   <label class="filter-label" for="environment-filter">Environment</label>
                   <select id="environment-filter"><option value="">All environments</option><option value="unknown">Unknown</option></select>
                 </div>
@@ -102,7 +111,7 @@
                     <option value="DONE">Done</option>
                   </select>
                 </div>
-                <label class="check-filter"><input id="stale-filter" type="checkbox" /> Stale only</label>
+                <label class="check-filter"><input id="stale-filter" type="checkbox" /> Not recently seen</label>
               </div>
               <div id="session-list" class="session-list" aria-live="polite"></div>
               <p id="session-empty" class="empty-state" hidden>No sessions match these filters.</p>

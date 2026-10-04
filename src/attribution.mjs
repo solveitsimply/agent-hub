@@ -1,8 +1,9 @@
 /** Reporting labels are claims, never authentication or provider billing proof. */
+import { attributionLabels } from './session-context.mjs';
 export const attributionFields = ['provider', 'client', 'model', 'accountLabel', 'apiKeyLabel'];
 
 export function parseAttribution(body, fail) {
-  const permitted = [...attributionFields, 'idempotencyKey', 'previousSegmentId'];
+  const permitted = [...attributionFields, 'interface', 'idempotencyKey', 'previousSegmentId'];
   for (const key of Object.keys(body)) if (!permitted.includes(key))
     fail(422, 'UNKNOWN_FIELD', `Unsupported attribution field: ${key}`);
   const metadata = { source: 'agent-reported' };
@@ -15,6 +16,10 @@ export function parseAttribution(body, fail) {
   }
   if (!metadata.provider || !metadata.client)
     fail(422, 'INVALID_ATTRIBUTION', 'Identify the provider and client; unavailable account, key and model labels remain null.');
+  if(body.interface!==undefined && body.interface!==null){
+    if(!['desktop','cli','web','ide','api'].includes(body.interface))fail(422,'INVALID_ATTRIBUTION','Use desktop, cli, web, ide or api for interface.');
+    metadata.interface=body.interface;
+  }
   if (typeof body.idempotencyKey !== 'string' || !body.idempotencyKey.trim() || body.idempotencyKey.length > 160)
     fail(422, 'INVALID_ATTRIBUTION', 'Provide a stable idempotency key for this change.');
   if (body.previousSegmentId !== null && (!Number.isSafeInteger(body.previousSegmentId) || body.previousSegmentId < 1))
@@ -24,5 +29,5 @@ export function parseAttribution(body, fail) {
 
 export const attributionView = row => ({
   id: row.id, sessionId: row.session_id, startedAt: row.started_at,
-  endedAt: row.ended_at ?? null, ...JSON.parse(row.metadata_json),
+  endedAt: row.ended_at ?? null, ...attributionLabels(JSON.parse(row.metadata_json)),
 });

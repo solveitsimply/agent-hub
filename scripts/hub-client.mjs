@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 /** Small, dependency-free client for the Agent Hub coordination API. */
+import { captureContext } from './local-context.mjs';
+import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -124,11 +126,15 @@ export async function readJsonStdin(stdin = process.stdin) {
 }
 
 function usage() {
-  return 'Usage: hub-client.mjs me | sessions [project] | register < JSON | update SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
+  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] | register < JSON | update SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
   const [command, ...args] = argv;
+  if (command === 'context') {
+    if (args.length > 1) throw new HubClientError('USAGE', usage());
+    return captureContext(args[0]);
+  }
   const client = createHubClient(env);
   const one = () => {
     if (args.length !== 1 || !args[0]) throw new HubClientError('USAGE', usage());
@@ -146,7 +152,8 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       return client.request('GET', '/api/sessions', { query: { project: optionalOne() } });
     case 'register':
       if (args.length) break;
-      return client.request('POST', '/api/sessions', { body: await readJsonStdin() });
+      { const body = await readJsonStdin();
+        return client.request('POST', '/api/sessions', { body: { ...body, machine: body.machine ?? hostname() } }); }
     case 'update':
       return client.request('PATCH', `/api/sessions/${one()}`, { body: await readJsonStdin() });
     case 'heartbeat':
