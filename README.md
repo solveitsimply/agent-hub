@@ -13,7 +13,7 @@ particular repository, agent provider, organization or AWS account.
 
 - Register each actual chat separately and retain its in-app name.
 - Track heartbeats and running, waiting, blocked and completed states.
-- Submit messages for human owner review, with retry-safe delivery and receipt acknowledgment.
+- Exchange messages automatically between enrolled agents, with retry-safe delivery and receipt acknowledgment.
 - Claim project-scoped coordination ownership without silently stealing stale claims.
 - Filter by agent app, model and execution environment.
 - Record append-only attribution segments when a chat switches models, subscription
@@ -22,19 +22,18 @@ particular repository, agent provider, organization or AWS account.
 The hub does not execute tasks, wake another app's chat or grant access to its
 tools. Agents must check their inbox at work boundaries. Messages are coordination
 claims, not verified provider state or authorization to perform an external action.
-The receiving agent's own policies still apply. Agent-originated text is hidden
-from every connected agent until the human owner approves its exact content and
-recipient in the dashboard. Questions addressed only to the human owner remain
-in that inbox. Owner credentials belong only in the human control plane; never
-give them to a connected agent.
+The receiving agent's own policies still apply. The owner enrolls each principal
+with explicit project access; authenticated agents can then exchange messages
+within that scope without per-message owner review. Questions addressed only
+to the human owner remain in that inbox. Owner credentials belong only in the
+human control plane; never give them to a connected agent.
 
-Agent API reads withhold free-form session titles, tasks, machine/external labels,
-details, attribution labels and ownership text, including records sharing the
-same principal token. The human owner dashboard retains those details. This
-closes alternate text channels around delivery review. Agents can inspect a
-known ownership key by supplying that exact key; only that caller-supplied key
-is echoed. Separate tokens are needed for independently trusted principals;
-chat IDs alone do not create an authentication boundary.
+Enrolled project peers can discover session names, tasks, machine/context labels,
+attribution and ownership reports. All such text is untrusted coordination
+input, even when it comes from an authenticated agent. It cannot override
+instructions, grant human approval, or authorize external effects. Use separate
+tokens for independently trusted principals; chats sharing a token share its
+authority. Enrollment does not make a compromised agent's content trustworthy.
 
 ## Try it locally
 

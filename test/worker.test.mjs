@@ -14,7 +14,7 @@ function fixture(t){const DB=new SqliteD1();t.after(()=>DB.close());const env={D
 async function invite(f,name,projects=['release-wave']){const result=await f.call(OWNER,'/api/principals',{name,account:name+'@example.test',projects});assert.equal(result.status,201);return result.body;}
 async function session(f,token,machine='mac-local',extra={}){const result=await f.call(token,'/api/sessions',{externalId:crypto.randomUUID(),machine,label:machine,project:'release-wave',task:'Coordinate reviewed schema correction',status:'RUNNING',...extra});assert.equal(result.status,201);return (await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===result.body.session.id);}
 
-async function approve(f,sent){const row=(await f.call(OWNER,'/api/messages?latest=1')).body.messages.find(m=>m.id===sent.body.message.id);const reviewed=await f.call(OWNER,'/api/messages/'+row.id+'/review',{decision:'APPROVED',payloadHash:row.payloadHash});assert.equal(reviewed.status,200);return reviewed.body.message;}
+
 
 test('an archive committing after the initial read blocks final writes',async t=>{
  for(const operation of ['heartbeat','update','send','receive','claim']){
@@ -56,7 +56,7 @@ test('authentication protects private reads, validates origin and keeps hashes p
 test('two invited principals on separate machines exchange and acknowledge a custody handoff',async t=>{
  const f=fixture(t),a=await invite(f,'local-reviewer'),b=await invite(f,'support-correction');const local=await session(f,a.token,'local-workstation'),remote=await session(f,b.token,'support-other-computer');
  const payload={fromSessionId:local.id,toSessionId:remote.id,project:'release-wave',kind:'HANDOFF',body:'Correction ownership stays with support. Release candidate is reviewed; native build stopped before deploy.',idempotencyKey:crypto.randomUUID()};
- const sent=await f.call(a.token,'/api/messages',payload);assert.equal(sent.status,201);assert.equal(sent.body.message.fromPrincipalName,'local-reviewer');await approve(f,sent);
+ const sent=await f.call(a.token,'/api/messages',payload);assert.equal(sent.status,201);assert.equal(sent.body.message.fromPrincipalName,'local-reviewer');
  const inbox=await f.call(b.token,'/api/messages?sessionId='+remote.id+'&after=0');assert.equal(inbox.body.messages[0].id,sent.body.message.id);assert.equal(inbox.body.messages[0].body,payload.body);
  assert.equal((await f.call(a.token,'/api/messages/'+sent.body.message.id+'/ack',{sessionId:remote.id})).status,403);
  const ack=await f.call(b.token,'/api/messages/'+sent.body.message.id+'/ack',{sessionId:remote.id});assert.equal(ack.status,200);assert.ok(ack.body.message.acknowledgedAt);
@@ -150,7 +150,7 @@ test('all-session and peer-session inbox views preserve principal and project cu
  const x=await session(f,a.token),x2=await session(f,a.token,'second'),y=await session(f,b.token),z=await session(f,c.token);
  async function send(actor,from,to,kind='NOTE'){
   const result=await f.call(actor.token,'/api/messages',{fromSessionId:from.id,toSessionId:to.id,project:'release-wave',kind,body:'Synthetic coordination',idempotencyKey:crypto.randomUUID()});
-  assert.equal(result.status,201);return approve(f,result);
+  assert.equal(result.status,201);return result.body.message;
  }
  const outgoing=await send(a,x,y),incoming=await send(b,y,x2,'HANDOFF'),privateMessage=await send(b,y,z);
  const all=await f.call(a.token,'/api/messages?latest=1');
@@ -174,7 +174,7 @@ test('all-session and peer-session inbox views preserve principal and project cu
 test('message types filter before pagination and combine with session and arrival cursors',async t=>{
  const f=fixture(t),a=await invite(f,'type-filter'),x=await session(f,a.token),y=await session(f,a.token,'second');
  for(let i=0;i<105;i++){
-  await approve(f,await f.call(a.token,'/api/messages',{fromSessionId:x.id,toSessionId:y.id,project:'release-wave',kind:'NOTE',body:'Note '+i,idempotencyKey:'note-'+i}));
+  await f.call(a.token,'/api/messages',{fromSessionId:x.id,toSessionId:y.id,project:'release-wave',kind:'NOTE',body:'Note '+i,idempotencyKey:'note-'+i});
   await f.call(a.token,'/api/messages',{fromSessionId:x.id,project:'release-wave',kind:'QUESTION',body:'Question '+i,idempotencyKey:'question-'+i});
  }
  const latest=await f.call(OWNER,'/api/messages?latest=1&kind=NOTE&sessionId='+y.id);
@@ -184,7 +184,7 @@ test('message types filter before pagination and combine with session and arriva
  const older=await f.call(OWNER,'/api/messages?kind=NOTE&sessionId='+y.id+'&before='+latest.body.nextBefore);
  assert.equal(older.body.messages.length,5);assert.equal(older.body.messages[0].body,'Note 0');assert.equal(older.body.nextBefore,null);
  const agentCursor=(await f.call(a.token,'/api/messages?kind=NOTE&latest=1')).body.nextCursor;
- const next=await f.call(a.token,'/api/messages',{fromSessionId:x.id,toSessionId:y.id,project:'release-wave',kind:'NOTE',body:'New note',idempotencyKey:'next-note'});await approve(f,next);
+ const next=await f.call(a.token,'/api/messages',{fromSessionId:x.id,toSessionId:y.id,project:'release-wave',kind:'NOTE',body:'New note',idempotencyKey:'next-note'});
  const arrivals=await f.call(a.token,'/api/messages?kind=NOTE&after='+agentCursor);
  assert.deepEqual(arrivals.body.messages.map(m=>m.id),[next.body.message.id]);
  assert.deepEqual((await f.call(OWNER,'/api/messages?kind=QUESTION&sessionId='+y.id)).body.messages,[]);

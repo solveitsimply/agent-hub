@@ -31,8 +31,8 @@ test('an in-app rename preserves stable session identity, attribution and owners
   await f.call(actor.token,'/api/ownership/claim',{sessionId:session.id,resourceKey:'review/source'});
   const renamed=await f.call(actor.token,`/api/sessions/${session.id}`,{label:'Review collection contract bindings'},'PATCH');
   assert.equal(renamed.status,200);
-  const humanView=(await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===session.id);for(const key of ['id','externalId','machine','project','principalId','status','task'])assert.equal(humanView[key],session[key]);assert.equal(humanView.label,'Review collection contract bindings');assert.match(renamed.body.session.label,/^Session /);
-  assert.deepEqual(humanView.latestAttribution,{provider:'test-provider',client:'Codex',model:'GPT-6.1 Sol'});assert.equal(renamed.body.session.latestAttribution,null);
+  const humanView=(await f.call(OWNER,'/api/sessions')).body.sessions.find(s=>s.id===session.id);for(const key of ['id','externalId','machine','project','principalId','status','task'])assert.equal(humanView[key],session[key]);assert.equal(humanView.label,'Review collection contract bindings');assert.equal(renamed.body.session.label,'Review collection contract bindings');
+  assert.deepEqual(humanView.latestAttribution,{provider:'test-provider',client:'Codex',model:'GPT-6.1 Sol'});assert.deepEqual(renamed.body.session.latestAttribution,humanView.latestAttribution);
   const history=await f.call(actor.token,`/api/sessions/${session.id}/attribution`);
   assert.equal(history.body.segments.length,1);assert.equal(history.body.segments[0].id,segment.id);
   assert.equal(f.DB.database.prepare('SELECT owner_session_id FROM ownership').get().owner_session_id,session.id);
@@ -114,8 +114,8 @@ test('machine aliases, agent interfaces and qualified Git context preserve ident
   assert.equal((await f.call(other.token,`/api/sessions/${session.id}`,{workContext:null},'PATCH')).status,403);
   assert.equal((await f.call(privateActor.token,'/api/sessions?project=shared&repository=github.com%2Fexample%2Fapp')).status,403);
   const agentView=await f.call(actor.token,'/api/sessions');
-  assert.ok(agentView.body.sessions.every(s=>s.workContext===null&&s.reportedMachine===null&&s.machine===null));
-  assert.deepEqual(agentView.body.filterOptions.branches,[null]);assert.deepEqual(agentView.body.filterOptions.environments,[null]);
+  assert.deepEqual(agentView.body.sessions.find(s=>s.id===session.id).workContext,context);assert.equal(agentView.body.sessions.find(s=>s.id===session.id).machine,'review-host.local');
+  assert.ok(agentView.body.filterOptions.branches.some(v=>v?.branch==='dev'));assert.ok(agentView.body.filterOptions.environments.includes('dev'));
   for(const branch of ['/invalid','bad..branch','bad.lock','bad@{name','has space'])assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,{workContext:{...context,branch}},'PATCH')).status,422);
   assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,{workContext:{...context,repository:'https://user:secret@example.test/app?token=value'}},'PATCH')).status,422);
   assert.equal((await f.call(actor.token,`/api/sessions/${session.id}`,{workContext:null,environment:null},'PATCH')).status,200);

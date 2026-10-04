@@ -151,7 +151,8 @@ test('MCP stdio initializes, lists tools, sends nothing spontaneously, and requi
   assert.equal(JSON.parse(await bridge.next()).result.protocolVersion, '2025-06-18');
   bridge.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const listed = JSON.parse(await bridge.next());
-  assert.ok(listed.result.tools.some((tool) => tool.name === 'hub_send_message'));
+  const sendTool=listed.result.tools.find((tool)=>tool.name==='hub_send_message');
+  assert.ok(sendTool);assert.match(sendTool.description,/Delivery is automatic/);assert.match(sendTool.description,/ongoing coordination/);assert.match(sendTool.inputSchema.properties.userAuthorized.description,/standing authorization/);
   assert.ok(listed.result.tools.some((tool) => tool.name === 'hub_list_ownership'));
   assert.equal(listed.result.tools.some((tool) => /review/.test(tool.name)), false, 'Agent bridge exposes no approval capability');
   assert.equal(requests.length, 0);

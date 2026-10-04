@@ -180,7 +180,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       if (args.length) break;
       const { userAuthorized, ...body } = await readJsonStdin();
       if (userAuthorized !== true)
-        throw new HubClientError('USER_AUTHORIZATION_REQUIRED', 'Send requires explicit human authorization and userAuthorized:true in JSON stdin.');
+        throw new HubClientError('USER_AUTHORIZATION_REQUIRED', 'Send requires human authorization covering this message (including standing recipient/task authorization) and userAuthorized:true in JSON stdin.');
       return client.request('POST', '/api/messages', { body });
     }
     case 'ack': {

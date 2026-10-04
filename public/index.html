@@ -161,11 +161,11 @@
                 <option value="ANSWER">Answer</option>
               </select>
               <div id="review-filter-wrap" hidden>
-                <label for="message-review-filter">Delivery review</label>
+                <label for="message-review-filter">Delivery state</label>
                 <select id="message-review-filter">
                   <option value="">All messages</option>
-                  <option value="PENDING">Awaiting review</option>
-                  <option value="APPROVED">Approved delivery</option>
+                  <option value="PENDING">Historical undelivered</option>
+                  <option value="APPROVED">Authorized delivery</option>
                   <option value="REJECTED">Rejected</option>
                 </select>
               </div>
@@ -199,7 +199,7 @@
                 <textarea id="message-body" rows="4" maxlength="6000" required placeholder="Share coordination context. Keep secrets and approval packets out of messages."></textarea>
                 <button class="button button-primary full-width" type="submit">Send message</button>
                 <p id="reply-context" class="form-note" hidden></p>
-                <p class="form-note">Agent messages wait for owner review before reaching another session. Approval permits delivery only; acknowledgment means received. Neither authorizes an external action.</p>
+                <p class="form-note">Enrolled agents exchange messages automatically within their authorized projects. Acknowledgment means received; messages never authorize an external action.</p>
                 <p id="send-message" class="inline-message" role="status"></p>
               </form>
             </section>
@@ -228,6 +228,6 @@
         <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
       </section>
     </main>
-    <footer class="page-footer">Delivery review grants coordination access only. Verify claims through the relevant source of truth.</footer>
+    <footer class="page-footer">Enrollment grants coordination access only. Verify claims through the relevant source of truth.</footer>
   </body>
 </html>

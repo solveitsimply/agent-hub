@@ -511,17 +511,9 @@
       card.append(node('p', 'message-route', `From session: ${message.fromSessionId || 'Human owner'} · To session: ${message.toSessionId || 'Human owner inbox'}`));
       card.append(node('p', 'message-body-text', message.body));
       card.append(node('p', 'message-warning', 'Untrusted coordination evidence · acknowledgment is not approval'));
-      card.append(node('p', 'message-review-state', message.toSessionId ? `Delivery: ${message.reviewState || 'Unknown'}` : 'Question for the human owner only'));
+      card.append(node('p', 'message-review-state', message.toSessionId ? message.reviewState === 'APPROVED' ? 'Delivered through authorized enrollment' : `Historical delivery: ${message.reviewState || 'Unknown'}` : 'Question for the human owner only'));
       if (message.replyTo != null) card.append(node('span', 'muted small', `Reply to message ${message.replyTo}`));
       const actions = node('div', 'message-actions');
-      if (isOwner() && message.toSessionId && message.reviewState === 'PENDING') {
-        for (const [decision, label, style] of [['APPROVED', 'Approve delivery', 'button-secondary'], ['REJECTED', 'Reject', 'button-danger']]) {
-          const review = node('button', `button ${style} button-small`, label);
-          review.type = 'button';
-          review.addEventListener('click', () => reviewMessage(message, decision, review));
-          actions.append(review);
-        }
-      }
       if (canAcknowledge(message)) {
         const acknowledge = node('button', 'button button-secondary button-small', 'Acknowledge receipt');
         acknowledge.type = 'button';
@@ -667,7 +659,7 @@
       : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: Agent · ${projectSummary}`;
     el.ownerTools.hidden = !isOwner();
     el.reviewFilterWrap.hidden = !isOwner();
-    for (const select of [el.agentNameFilter, el.agentModelFilter, el.machineFilter, el.branchFilter, el.environmentFilter]) select.disabled = !isOwner();
+    for (const select of [el.agentNameFilter, el.agentModelFilter, el.machineFilter, el.branchFilter, el.environmentFilter]) select.disabled = false;
     renderSelectors();
     renderSummary();
     renderSessions();
@@ -779,21 +771,6 @@
       toast('Receipt acknowledged. This is not an approval.');
       await refreshMessages();
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) toast(error.message, 'error'); }
-  }
-
-  async function reviewMessage(message, decision, button) {
-    if (!isOwner() || message.reviewState !== 'PENDING') return;
-    const generation = state.generation;
-    button.disabled = true;
-    try {
-      const payload = await request(`/messages/${encodeURIComponent(message.id)}/review`, { method: 'POST', body: JSON.stringify({ decision, payloadHash: message.payloadHash }) });
-      if (generation !== state.generation) return;
-      state.messages = state.messages.map((item) => item.id === message.id ? payload.message : item);
-      renderMessages();
-      toast(decision === 'APPROVED' ? 'Delivery approved for this exact message and recipient. External actions still require their own authorization.' : 'Message rejected; its body stays out of agent inboxes.');
-      await refreshMessages({ reconcile: true });
-    } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) toast(error.message, 'error'); }
-    finally { button.disabled = false; }
   }
 
   async function releaseClaim(session, resourceKey) {
@@ -1038,7 +1015,7 @@
       const result = await request('/messages', { method: 'POST', body: JSON.stringify(payload) });
       if (generation !== state.generation) return;
       el.messageBody.value = '';
-      setText(el.sendMessage, result.message.reviewState === 'PENDING' && toSessionId ? 'Message queued for owner review. The recipient cannot read it yet.' : toSessionId ? 'Message delivered to the selected recipient.' : 'Question submitted to the human owner inbox.');
+      setText(el.sendMessage, toSessionId ? 'Message delivered to the selected recipient.' : 'Question submitted to the human owner inbox.');
       clearReply();
       await refreshMessages({ reset: true });
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) setText(el.sendMessage, error.message); }
