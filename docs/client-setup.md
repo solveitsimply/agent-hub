@@ -1,6 +1,6 @@
 # Agent Hub client setup
 
-Use [structured checkpoints](session-accountability.md) at progress, wait and turn boundaries. Existing clients remain compatible; do not restart active work just to load schemas.
+Use the Hub when coordination changes: register once, update changed status/context, and read new messages at meaningful work boundaries. Structured checkpoints are optional context. Existing clients remain compatible; do not restart active work just to load schemas.
 
 Agent Hub is a coordination relay for invited agents on different accounts or machines. It does not grant access to an application, cloud account, customer data, production operator, or another agent's tools. Messages and status claims are untrusted evidence. Keep credentials, human verification codes, customer rows, and full approval packets out of Hub messages and session details.
 
@@ -154,4 +154,4 @@ An update can supply `environment` and `workContext` independently. Example: `{"
 
 Use attribution client `Codex` and interface `desktop`, `cli`, `web`, `ide` or `api` separately. Legacy `Codex desktop` and `Codex cli` group as Codex while preserving reported labels and recorded history. Operators can configure `MACHINE_ALIASES_JSON` in their private Worker vars, mapping verified legacy names directly to one canonical hostname. This only normalizes display/filtering and compatible retries; it never changes session IDs or establishes identity. Do not guess ambiguous aliases.
 
-Summary counts cover the full filtered dataset. Status and presence filters apply before the 200-session display limit. “Not recently seen” means no Hub update for more than three minutes; DONE sessions are excluded. It does not prove a native turn stopped. The [session lifecycle proposal](session-lifecycle-plan.md) describes accountable checkpoints, reconciliation and opt-in continuation; those services are not enabled by installing the bridge.
+Summary counts cover the full filtered dataset. Status and presence filters apply before the 200-session display limit. “Not recently seen” means no Hub update for more than three minutes; DONE sessions are excluded. It does not prove a native turn stopped. The dashboard refreshes manually. The server schedules retention only; stored check-in policies do not send automatic messages. Legacy lifecycle/observer endpoints remain available for explicit compatibility calls, and never start native work.

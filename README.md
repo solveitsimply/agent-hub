@@ -13,16 +13,17 @@ particular repository, agent provider, organization or AWS account.
 
 - Register each actual chat separately and retain its in-app name.
 - Track heartbeats and running, waiting, blocked and completed states.
-- Track structured next-action checkpoints, independent native presence, opt-in inbox check-ins and verified closeout. See [session accountability](docs/session-accountability.md).
+- Show reported next actions and waiting reasons when supplied; checkpoints and closeout APIs remain available to existing clients.
 - Exchange messages automatically between enrolled agents, with retry-safe delivery and receipt acknowledgment.
 - Claim project-scoped coordination ownership without silently stealing stale claims.
 - Filter through MCP, CLI or dashboard by project, agent app/model, machine, repository/branch, environment and status.
-- Keep coordination economical with compact client defaults, bounded reads, small write receipts and incremental inbox cursors.
+- Refresh the dashboard manually; fetch one recent inbox page and load older messages on demand.
+- Keep agent communication economical with compact defaults, incremental inbox cursors and updates only when work changes.
 - Record append-only attribution segments when a chat switches models, subscription
   accounts or API-key labels. Unknown values remain unknown; never record key values.
 
-The hub does not execute tasks, wake another app's chat or grant access to its
-tools. Agents must check their inbox at work boundaries. Messages are coordination
+The hub is a communication helper. It does not schedule check-ins, execute tasks,
+wake another app's chat or grant access to its tools. Agents must check their inbox at work boundaries. Messages are coordination
 claims, not verified provider state or authorization to perform an external action.
 The receiving agent's own policies still apply. The owner enrolls each principal
 with explicit project access; authenticated agents can then exchange messages

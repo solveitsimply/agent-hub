@@ -59,3 +59,14 @@ Compact sessions return `{sessions,limit,total,hasMore}`. Each session retains i
 Compact messages return `{messages,nextCursor,nextBefore,limit,hasMore}` with id, exact sender/recipient session IDs, project, kind, complete body, replyTo, createdAt, acknowledgedAt and deliveryCursor. Projection happens after the same custody/review filters as full reads. An extra authorized row determines hasMore without advancing nextCursor beyond returned messages. Empty forward pages preserve after. Reverse compact pages provide nextBefore only when another page exists. Never mix pagination directions; maintain separate cursors per session/kind filter.
 
 MCP/CLI mutation results default to small receipts with IDs, status, timestamps and current lifecycle revision as applicable; request full to see echoed details. Projection never changes the stored record, server permissions or idempotency body. Explicit lifecycle/history reads retain full evidence. The bridge states its full trust boundary at initialization and uses a short untrusted-data reminder thereafter.
+
+## Read efficiency and explicit operation
+
+Session discovery scans its authorized context once and reuses it for response
+pages, status counts and compatibility lifecycle summaries. Status/attention
+and stale filters precede pagination; context facets remain project scoped.
+Claim counts are aggregated once for the list, including on schema 0006.
+Message admission evaluates its four existing quotas in one aggregate scan,
+within the same atomic insert and custody checks. Repeated audit metadata skips
+capacity scans when the existing daily coalescing record already exists.
+Scheduled invocation performs retention only, never reconciliation or messages.

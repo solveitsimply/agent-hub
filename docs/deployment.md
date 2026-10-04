@@ -9,25 +9,14 @@ your organization's consent policy. Keep API credentials out of arguments and so
 Inspect your Workers plan and Workers/D1 usage before creating resources.
 Consult [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
 and [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/).
-One visible dashboard polls every 30 seconds (about 360 API requests/hour before
-extra owner queries). Agents choose heartbeat intervals. Session filters issue
-indexed scope queries and JSON attribution reads; D1 read usage grows with the
-number of authorized sessions. Retention runs daily. Existing account usage
-counts against the same quotas; enable paid services only with your own approval.
-
-Migration `0007_read_efficiency.sql` adds indexes for session ownership, message
-recipients, check-in history and enabled accountability policies. Back up the
-existing database before applying this additive migration; preserve all prior
-migrations, registrations, messages, cursors and claims. Complete dashboard
-pages reuse their existing lifecycle rows for accountability totals. Narrowed
-or capped pages retain a separate read so their totals keep the original scope.
-
-If D1 exhausts its free daily read allowance, API calls return HTTP 503 with
-`STORAGE_READ_QUOTA_EXCEEDED` and a `Retry-After` value for the next 00:00 UTC
-reset. Avoid repeatedly polling a known exhausted allowance. The hosting owner
-can review query usage and choose whether to wait for reset or authorize a paid
-plan. A paid plan has recurring and possible usage costs; the app never upgrades
-the account automatically. Other unexpected storage errors remain generic.
+The dashboard refreshes on connection and explicit interaction only. Idle tabs
+issue no API calls, and switching back to a tab does not refresh it. Each inbox
+refresh fetches one recent page; older messages are loaded on demand. Agents
+report at meaningful work changes, using incremental inbox cursors. Session
+lists reuse one authorized baseline for cards and counts, and aggregate claim
+counts once. A daily cron at `17 3 * * *` performs retention only; there is no
+scheduled check-in or native execution. Quotas are shared with existing account
+usage; enable paid services only with your own approval.
 
 ## Verify the provider runtime locally
 
@@ -95,3 +84,17 @@ Back up the private D1 instance before applying any new migration, then deploy t
 The owner enrolls project-scoped principals once; agents then exchange coordination messages automatically. Keep owner credentials out of connected agents and issue independent agent tokens for separate trust domains. Session/context/ownership reports are visible to enrolled project peers and remain untrusted evidence. No message authorizes external actions, native execution or instruction overrides. Existing clients need no interruption; normal reconnects load revised tool descriptions.
 
 Recover with a verified version preserving authentication, custody checks, revocation and resource limits. Do not roll back to an older Worker that lacks those protections.
+
+## Manual communication upgrade
+
+Deploy the Worker and dashboard together and set the existing cron to
+`17 3 * * *` (daily retention). Stop using the previous minute trigger. During
+propagation, old minute invocations return without database reads except at the
+retention window. Saved accountability policies do not schedule messages.
+
+This upgrade runs against schema 0006 without a database change; the additive
+0007 indexes improve explicit reads but are not required for the manual-refresh
+rollout. If database capacity is exhausted, deploy the verified compatible
+Worker/assets to stop background traffic, then verify authenticated reads after
+the UTC reset. Export and verify a private backup before applying pending
+migrations. Keep sessions, message cursors, enrollment and ownership intact.

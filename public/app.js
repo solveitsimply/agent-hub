@@ -9,16 +9,12 @@
     DONE: 'Done',
   };
   const MESSAGE_LABELS = { NOTE: 'Note', HANDOFF: 'Handoff', QUESTION: 'Question', ANSWER: 'Answer' };
-  const ATTENTION_LABELS = {WAITING_USER:'Waiting on User',READY:'Ready to continue',RECONCILE:'Needs reconciliation',WAITING:'Waiting for agent / event',WORKING:'Working',PAUSED:'Paused / budget limited',CLEANUP:'Closeout needed',COMPLETE:'Closeout recorded'};
-  const ATTENTION_ORDER = Object.keys(ATTENTION_LABELS);
   const state = {
     token: null,
     principal: null,
     sessions: [],
     sessionFilterOptions: { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] },
     sessionSummary: null,
-    accountability: null,
-    lifecycleDrafts: {},
     sessionTotal: 0,
     sessionLimit: 200,
     messages: [],
@@ -27,7 +23,6 @@
     selectedSessionId: '',
     attribution: { sessionId: '', segments: [], cursor: null, hasMore: false, loading: false, error: '' },
     attributionGeneration: 0,
-    messageCursor: 0,
     messageViewSessionId: null,
     messageViewKind: null,
     messageViewReviewState: null,
@@ -36,7 +31,6 @@
     hasMoreMessages: false,
     messageBefore: null,
     replyTo: null,
-    timer: null,
     refreshing: false,
     refreshRequested: false,
     generation: 0,
@@ -51,7 +45,6 @@
     summary: $('principal-summary'), sessions: $('session-list'), sessionEmpty: $('session-empty'),
     copyAgentSetup: $('copy-agent-setup'), setupFallback: $('agent-setup-fallback'), setupText: $('agent-setup-text'), closeSetup: $('close-agent-setup'),
     summaryRunning: $('summary-running'), summaryWaitingUser: $('summary-waiting-user'), summaryWaitingAgent: $('summary-waiting-agent'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
-    attentionFilter:$('attention-filter'), metrics:$('accountability-metrics'), observerCredential:$('observer-credential'), observerValue:$('observer-credential-value'),
     projectFilter: $('project-filter'), agentNameFilter: $('agent-name-filter'), agentModelFilter: $('agent-model-filter'),
     machineFilter: $('machine-filter'), branchFilter: $('branch-filter'), environmentFilter: $('environment-filter'), statusFilter: $('status-filter'), staleFilter: $('stale-filter'), sessionCount: $('session-count'),
     detail: $('session-detail'), detailTitle: $('detail-title'), detailStatus: $('detail-status'), detailContent: $('detail-content'),
@@ -260,8 +253,7 @@
     return (!visibleProject() || session.project === visibleProject()) &&
       (el.statusFilter.value === 'ALL' || session.status === el.statusFilter.value ||
         (el.statusFilter.value === 'WAITING' && (session.status === 'WAITING_ON_USER' || session.status === 'WAITING_ON_AGENT'))) &&
-      (!el.staleFilter.checked || (session.stale === true && session.status !== 'DONE')) &&
-      (!el.attentionFilter.value || session.lifecycle?.attention === el.attentionFilter.value);
+      (!el.staleFilter.checked || (session.stale === true && session.status !== 'DONE'));
   }
 
   function sessionQuery() {
@@ -284,7 +276,6 @@
     }
     if (el.statusFilter.value !== 'ALL') query.set('status', el.statusFilter.value);
     if (el.staleFilter.checked) query.set('staleOnly', '1');
-    if (el.attentionFilter.value) query.set('attention',el.attentionFilter.value);
     const serialized = query.toString();
     return serialized ? `?${serialized}` : '';
   }
@@ -295,12 +286,6 @@
       $('count-' + id).textContent = String(summary?.[status] ?? state.sessions.filter(item => item.status === status).length);
     }
     $('count-stale').textContent = String(summary?.stale ?? state.sessions.filter(item => item.stale && item.status !== 'DONE').length);
-    for(const [id,category] of [['ready','READY'],['reconcile','RECONCILE'],['cleanup','CLEANUP']]) {
-      $('count-'+id).textContent=String(state.accountability?.categories?.[category]??0);
-      $('summary-'+id).setAttribute('aria-pressed',String(el.attentionFilter.value===category));
-    }
-    const a=state.accountability;
-    el.metrics.textContent=a ? `${a.unaccounted} unfinished session${a.unaccounted===1?' needs':'s need'} follow-up · ${a.unaccountedClaims} held claims · next-action reports ${a.checkpointCoverage}/${a.total} · native observation ${a.observerCoverage}/${a.total}${a.oldestUnaccountedAt ? ' · oldest '+formatTime(a.oldestUnaccountedAt):''}` : '';
   }
 
   function sessionWaitSummary(session) {
@@ -345,7 +330,6 @@
     el.summaryStale.setAttribute('aria-pressed', String(el.staleFilter.checked));
     clear(el.sessions);
     const sessions = state.sessions.filter(sessionMatches).sort((a, b) => {
-      if(a.lifecycle && b.lifecycle) return ATTENTION_ORDER.indexOf(a.lifecycle.attention)-ATTENTION_ORDER.indexOf(b.lifecycle.attention) || String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || ''));
       const statusOrder = { WAITING_ON_USER: 0, WAITING_ON_AGENT: 1, BLOCKED: 2, RUNNING: 3, DONE: 4 };
       return (statusOrder[a.status] ?? 5) - (statusOrder[b.status] ?? 5) || String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || ''));
     });
@@ -384,14 +368,7 @@
         stale.title = 'No Hub update for more than three minutes; work may still be running or waiting.';
         card.append(stale);
       }
-      if(session.lifecycle){
-        const life=session.lifecycle;
-        const attentionRepeated = (waitSummary && ['WAITING_USER', 'WAITING', 'RECONCILE'].includes(life.attention)) || (session.status === 'RUNNING' && life.attention === 'WORKING');
-        if (!attentionRepeated) card.append(node('span',`attention-label attention-${life.attention.toLowerCase()}`,ATTENTION_LABELS[life.attention]));
-        if (!waitSummary) card.append(node('span','session-next-action',life.checkpoint?.nextAction || life.reason));
-        if(life.checkpoint?.waitStartedAt)card.append(node('span','muted small','Waiting since '+formatTime(life.checkpoint.waitStartedAt)));
-        card.append(node('span','muted small',`Native coverage: ${life.coverage.replaceAll('_',' ')}${!waitSummary && life.checkpoint?.nextCheckAt ? ' · next check '+formatTime(life.checkpoint.nextCheckAt):''}`));
-      }
+      if (!waitSummary && session.lifecycle?.checkpoint?.nextAction) card.append(node('span','session-next-action',session.lifecycle.checkpoint.nextAction));
       card.addEventListener('click', () => selectSession(session.id));
       const copy = node('button', 'button button-quiet button-small session-copy', 'Copy session name & ID');
       copy.type = 'button';
@@ -433,6 +410,9 @@
   }
 
   function renderEvidence(details) {
+    const populated=Object.values(details).some(value=>Array.isArray(value)?value.length>0:typeof value==='string'&&value.length>0);
+    el.releaseDetails.closest('section').hidden=!populated;
+    el.releaseDetails.closest('.detail-columns').classList.toggle('claims-only',!populated);
     clear(el.releaseDetails);
     const keys = ['releaseRequestId', 'selectedCommit', 'nativeBuildStatus', 'migrationState', 'recoveryBoundary'];
     const list = node('dl', 'detail-list');
@@ -455,7 +435,6 @@
 
   function renderSessionDetail() {
     const session = selectedSession();
-    if(session && el.detail.dataset.sessionId===session.id && document.activeElement?.closest('.checkpoint-form, .closeout-form'))return;
     el.detail.dataset.sessionId=session?.id??'';
     el.detail.hidden = !session;
     el.archiveSession.hidden = !(session && ownsSession(session) && session.status === 'DONE' && !session.archivedAt);
@@ -478,8 +457,15 @@
       ['External ID', session.externalId], ['Project', session.project], ['Environment', session.environment],
       ['Repository', session.workContext?.repository], ['Branch', session.workContext?.branch], ['Commit', session.workContext?.commit],
       ['Reported machine', session.reportedMachine], ['Last Hub update', formatTime(session.lastSeenAt)],
-    ]) addDetailRow(list, label, value);
+    ]) if (value != null && value !== '') addDetailRow(list, label, value);
     el.detailContent.append(list);
+    if (session.externalId?.startsWith('codex:')) {
+      const nativeId=session.externalId.slice(6);
+      if (/^[a-zA-Z0-9_-]{1,160}$/.test(nativeId)) {
+        const link=node('a','button button-quiet button-small','Open original chat');
+        link.href='codex://threads/'+encodeURIComponent(nativeId);el.detailContent.append(link);
+      }
+    }
     renderLifecycle(session);
     renderEvidence(session.details || {});
     renderAttribution();
@@ -487,76 +473,20 @@
   }
 
   function renderLifecycle(session) {
-    const life=session.lifecycle;if(!life)return;
-    const panel=node('section','subpanel lifecycle-panel');panel.id='lifecycle-panel';
-    panel.append(node('h3','',ATTENTION_LABELS[life.attention]),node('p','',life.reason));
+    const checkpoint=session.lifecycle?.checkpoint;
+    if (!checkpoint) return;
+    const panel=node('section','subpanel');
+    panel.append(node('h3','','Reported next action'));
     const fields=node('dl','detail-list');
-    for(const [label,value] of [['Outcome',life.checkpoint?.outcome],['Acceptance criteria',life.checkpoint?.acceptanceCriteria],['Next action',life.checkpoint?.nextAction],['Waiting for',life.checkpoint?.wait?.reason],['Waiting since',life.checkpoint?.waitStartedAt?formatTime(life.checkpoint.waitStartedAt):null],['Next check',life.checkpoint?.nextCheckAt?formatTime(life.checkpoint.nextCheckAt):null],['Progress reported',life.checkpoint?.lastProgressAt?formatTime(life.checkpoint.lastProgressAt):null],['Checkpoint received',life.checkpointAt?formatTime(life.checkpointAt):null],['Native state',life.observation?.state],['Native observed',life.observation?.observedAt?formatTime(life.observation.observedAt):null],['Native observer',life.observation?.source],['Coverage',life.coverage.replaceAll('_',' ')],['Check-in',life.checkIn?.state],['Continuation',life.continuation.reason]])addDetailRow(fields,label,value);
+    for(const [label,value] of [['Next action',checkpoint.nextAction],['Waiting for',checkpoint.wait?.reason],['Next check',checkpoint.nextCheckAt?formatTime(checkpoint.nextCheckAt):null],['Pause reason',checkpoint.pauseReason]])addDetailRow(fields,label,value);
     panel.append(fields);
-    if(life.dependency){const button=node('button','button button-quiet button-small','View dependency');button.type='button';button.addEventListener('click',()=>selectSession(life.dependency.sessionId));panel.append(button);}
-    const isCodex=session.externalId?.startsWith('codex:') || session.latestAttribution?.client==='Codex';
-    const nativeId=life.observation?.nativeId || (isCodex ? session.externalId?.replace(/^codex:/,'') : null);
-    if(isCodex && nativeId && /^[a-zA-Z0-9_-]{1,160}$/.test(nativeId)){
-      const link=node('a','button button-secondary button-small','Open native chat');link.href='codex://threads/'+encodeURIComponent(nativeId);panel.append(link);
-    }
-    const control=async(button,path,body,method='POST',saved)=>{button.disabled=true;try{await request(path,{method,body:JSON.stringify(body)});saved?.();await refresh({quiet:true});}catch(error){if(!(error instanceof StaleRequestError))toast(error.message,'error');}finally{button.disabled=false;}};
-    if(isOwner()){
-      const actions=node('div','lifecycle-actions');
-      const check=node('button','button button-secondary button-small','Send one check-in');check.type='button';check.disabled=!life.canCheckIn;
-      check.addEventListener('click',()=>control(check,`/sessions/${session.id}/check-in`,{expectedRevision:life.revision}));actions.append(check);
-      const policy=node('label','check-label'),toggle=node('input');toggle.type='checkbox';toggle.checked=Boolean(life.policy.checkInEnabled);
-      toggle.addEventListener('change',()=>control(toggle,`/sessions/${session.id}/accountability-policy`,{checkInEnabled:toggle.checked}));
-      policy.append(toggle,node('span','','Automatically check in on this session (at most once/day)'));actions.append(policy);
-      actions.append(node('p','muted small','Check-ins use the Hub inbox; they do not wake a disconnected native chat. Active execution, human decisions, pauses and offline observers suppress check-ins.'));
-      if(!life.observation || life.coverage==='revoked'){
-        const connect=node('button','button button-quiet button-small','Connect read-only native observer');connect.type='button';connect.disabled=!nativeId;
-        connect.addEventListener('click',async()=>{
-          connect.disabled=true;try{const value=await request('/observers',{method:'POST',body:JSON.stringify({name:'Native state observer',sessions:[{sessionId:session.id,nativeId}],expiresInDays:7})});
-            el.observerValue.value=JSON.stringify({hubUrl:location.origin,observerId:value.observer.id,observerToken:value.token,expiresAt:value.observer.expiresAt,sessions:value.observer.sessions},null,2);el.observerCredential.hidden=false;await refresh({quiet:true});
-          }catch(error){if(!(error instanceof StaleRequestError))toast(error.message,'error');}finally{connect.disabled=false;}
-        });actions.append(connect);
-      } else {const revoke=node('button','button button-quiet button-small','Disconnect native observer');revoke.type='button';revoke.addEventListener('click',()=>control(revoke,`/observers/${life.observation.observerId}`,{},'DELETE'));actions.append(revoke);}
-      panel.append(actions);
-    }
-    if(ownsSession(session) && session.status!=='DONE'){
-      const form=node('form','stack-form checkpoint-form');form.append(node('h4','','Record a checkpoint'));
-      const inputs={};
-      const draft=state.lifecycleDrafts[session.id];
-      for(const [key,label,max] of [['outcome','Outcome',1000],['acceptanceCriteria','Acceptance criteria',1500],['nextAction','Next action',1000],['waitReason','Waiting reason',1000],['nextCheckAt','Next check',36],['pauseReason','Pause reason',1000]]){
-        const field=node('input');field.id='checkpoint-'+key;field.maxLength=max;field.required=['outcome','acceptanceCriteria'].includes(key);field.value=key==='waitReason'?life.checkpoint?.wait?.reason??'':life.checkpoint?.[key]??'';
-        if(key==='nextCheckAt'){const initial=field.value;field.type='datetime-local';if(initial){const date=new Date(initial);field.value=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);}}
-        if(draft?.fields?.[key]!==undefined)field.value=draft.fields[key];
-        const labelNode=node('label','',label);labelNode.htmlFor=field.id;form.append(labelNode,field);inputs[key]=field;
-      }
-      const waitKind=node('select');waitKind.id='checkpoint-waitKind';option(waitKind,'','Executable next action');for(const kind of ['user','agent','external','scheduled'])option(waitKind,kind,kind);waitKind.value=life.checkpoint?.wait?.kind??'';const waitLabel=node('label','','Waiting for');waitLabel.htmlFor=waitKind.id;form.append(waitLabel,waitKind);
-      if(draft?.fields?.waitKind!==undefined)waitKind.value=draft.fields.waitKind;
-      const recordDraft=()=>{state.lifecycleDrafts[session.id]={revision:draft?.revision??life.revision,fields:{...Object.fromEntries(Object.entries(inputs).map(([key,value])=>[key,value.value])),waitKind:waitKind.value}};};form.addEventListener('input',recordDraft);form.addEventListener('change',recordDraft);
-      const submit=node('button','button button-secondary','Save checkpoint');submit.type='submit';form.append(submit);
-      form.addEventListener('submit',event=>{event.preventDefault();const checkpoint={outcome:inputs.outcome.value,acceptanceCriteria:inputs.acceptanceCriteria.value,nextAction:inputs.nextAction.value||null};for(const key of ['lastProgressAt','completionEvidence','presenceIntervalSeconds'])if(life.checkpoint?.[key]!==undefined)checkpoint[key]=life.checkpoint[key];if(inputs.nextCheckAt.value)checkpoint.nextCheckAt=new Date(inputs.nextCheckAt.value).toISOString();if(inputs.pauseReason.value)checkpoint.pauseReason=inputs.pauseReason.value;if(waitKind.value)checkpoint.wait={...(life.checkpoint?.wait?.kind===waitKind.value?life.checkpoint.wait:{}),kind:waitKind.value,reason:inputs.waitReason.value};control(submit,`/sessions/${session.id}/checkpoint`,{expectedRevision:state.lifecycleDrafts[session.id]?.revision??life.revision,checkpoint},'PUT',()=>{delete state.lifecycleDrafts[session.id];el.detail.dataset.sessionId='';});});panel.append(form);
-    }
-    if(session.status==='DONE'){
-      const list=node('dl','detail-list');for(const key of ['objective','workspace','nativeChat'])addDetailRow(list,humanizeKey(key),life.closeout?.[key] ? `${life.closeout[key].state}: ${life.closeout[key].evidence}${life.closeout[key].revisitAt?' · revisit '+life.closeout[key].revisitAt:''}`:'Not recorded');addDetailRow(list,'Claims',String(life.heldClaims));panel.append(list);
-      if(ownsSession(session)){
-        const form=node('form','stack-form closeout-form'),inputs={};form.append(node('h4','','Record verified closeout'));
-        const draftKey=session.id+':closeout',draft=state.lifecycleDrafts[draftKey];
-        for(const [key,states] of [['objective',['verified','failed']],['workspace',['complete','retained','failed','not_applicable']],['nativeChat',['archived','retained','failed','not_applicable']]]){
-          const select=node('select');for(const state of states)option(select,state,state);select.value=life.closeout?.[key]?.state??states[0];select.setAttribute('aria-label',humanizeKey(key)+' state');
-          const evidence=node('input');evidence.required=true;evidence.maxLength=1000;evidence.placeholder=humanizeKey(key)+' evidence / retained reason';evidence.setAttribute('aria-label',evidence.placeholder);evidence.value=life.closeout?.[key]?.evidence??'';
-          const revisit=node('input');revisit.maxLength=512;revisit.placeholder='Revisit trigger if retained';revisit.setAttribute('aria-label',humanizeKey(key)+' revisit trigger');revisit.value=life.closeout?.[key]?.revisitAt??'';
-          if(draft?.fields?.[key]){select.value=draft.fields[key].state;evidence.value=draft.fields[key].evidence;revisit.value=draft.fields[key].revisitAt;}
-          form.append(node('label','',humanizeKey(key)),select,evidence,revisit);inputs[key]={select,evidence,revisit};
-        }
-        const recordDraft=()=>{state.lifecycleDrafts[draftKey]={revision:draft?.revision??life.revision,fields:Object.fromEntries(Object.entries(inputs).map(([key,value])=>[key,{state:value.select.value,evidence:value.evidence.value,revisitAt:value.revisit.value}]))};};form.addEventListener('input',recordDraft);form.addEventListener('change',recordDraft);
-        const submit=node('button','button button-secondary','Save closeout');submit.type='submit';form.append(submit);form.addEventListener('submit',event=>{event.preventDefault();const body={expectedRevision:state.lifecycleDrafts[draftKey]?.revision??life.revision};for(const [key,value] of Object.entries(inputs))body[key]={state:value.select.value,evidence:value.evidence.value,...(value.select.value==='retained'?{revisitAt:value.revisit.value}:{})};control(submit,`/sessions/${session.id}/closeout`,body,'PUT',()=>{delete state.lifecycleDrafts[draftKey];el.detail.dataset.sessionId='';});});panel.append(form);
-      }
-    }
     el.detailContent.append(panel);
   }
 
   function renderAttribution() {
     const current = state.attribution;
     clear(attributionPanel.list);
-    attributionPanel.panel.hidden = !selectedSession();
+    attributionPanel.panel.hidden = !selectedSession()?.latestAttribution;
     attributionPanel.refresh.disabled = current.loading;
     attributionPanel.more.hidden = !current.hasMore;
     attributionPanel.more.disabled = current.loading;
@@ -588,7 +518,7 @@
   }
 
   async function loadAttribution(sessionId, { reset = false, more = false } = {}) {
-    if (!sessionId || selectedSession()?.id !== sessionId) return;
+    if (!sessionId || selectedSession()?.id !== sessionId || !selectedSession()?.latestAttribution) return;
     const current = state.attribution;
     if (!reset && !more && current.sessionId === sessionId) return;
     if (more && (!current.hasMore || current.loading || current.sessionId !== sessionId || current.cursor == null)) return;
@@ -701,7 +631,6 @@
   function resetMessageView() {
     state.messageGeneration += 1;
     state.messages = [];
-    state.messageCursor = 0;
     state.messageBefore = null;
     state.messageViewSessionId = null;
     state.messageViewKind = null;
@@ -710,24 +639,22 @@
     state.messageLoading = false;
   }
 
-  async function refreshMessages({ reset = false, older = false, reconcile = false } = {}) {
+  async function refreshMessages({ reset = false, older = false } = {}) {
     if (!state.principal) return;
     const sessionId = state.selectedSessionId;
     const kind = el.messageFilter.value;
     const reviewState = isOwner() ? el.reviewFilter.value : '';
     const resetView = reset || state.messageViewSessionId !== sessionId || state.messageViewKind !== kind || state.messageViewReviewState !== reviewState;
-    const reconcileView = !resetView && !older && reconcile && isOwner() && state.messages.length > 0;
     if (!resetView && state.messageLoading) return;
     if (older && !resetView && !state.hasMoreMessages) return;
     const generation = state.generation;
     const requestId = ++state.messageGeneration;
     const isCurrent = () => generation === state.generation && requestId === state.messageGeneration &&
       sessionId === state.selectedSessionId && kind === el.messageFilter.value && reviewState === (isOwner() ? el.reviewFilter.value : '');
-    const query = resetView
-      ? new URLSearchParams({ latest: '1' })
-      : older
-        ? new URLSearchParams({ before: String(state.messageBefore) })
-        : new URLSearchParams({ after: String(reconcileView ? Math.min(...state.messages.map((message) => message.id)) - 1 : state.messageCursor) });
+    // One recent page per explicit refresh. History is fetched only on demand.
+    const query = older && !resetView
+      ? new URLSearchParams({ before: String(state.messageBefore) })
+      : new URLSearchParams({ latest: '1' });
     if (sessionId) query.set('sessionId', sessionId);
     if (kind) query.set('kind', kind);
     if (reviewState) query.set('reviewState', reviewState);
@@ -737,38 +664,18 @@
       const payload = await request(`/messages?${query.toString()}`);
       if (!isCurrent()) return;
       const incoming = payload.messages || [];
-      let nextCursor = payload.nextCursor;
-      if (reconcileView) {
-        let page = incoming;
-        while (page.length === 100) {
-          query.set('after', String(nextCursor));
-          const next = await request(`/messages?${query.toString()}`);
-          if (!isCurrent()) return;
-          page = next.messages || [];
-          incoming.push(...page);
-          nextCursor = next.nextCursor;
-        }
-      }
-      if (resetView) {
+      if (resetView || !older) {
         state.messages = incoming;
-        state.messageCursor = payload.nextCursor ?? 0;
         state.messageBefore = payload.nextBefore ?? null;
         state.hasMoreMessages = state.messageBefore !== null;
         state.messageViewSessionId = sessionId;
         state.messageViewKind = kind;
         state.messageViewReviewState = reviewState;
-      } else if (reconcileView) {
-        state.messages = incoming;
-        state.messageCursor = Math.max(state.messageCursor, nextCursor ?? state.messageCursor);
       } else if (older) {
         const known = new Set(state.messages.map((message) => message.id));
         state.messages.unshift(...incoming.filter((message) => !known.has(message.id)));
         state.messageBefore = payload.nextBefore ?? null;
         state.hasMoreMessages = state.messageBefore !== null;
-      } else {
-        const known = new Set(state.messages.map((message) => message.id));
-        state.messages.push(...incoming.filter((message) => !known.has(message.id)));
-        state.messageCursor = Math.max(state.messageCursor, payload.nextCursor ?? state.messageCursor);
       }
     } catch (error) {
       if (isCurrent()) throw error;
@@ -861,7 +768,6 @@
         };
       }
       state.sessionSummary = sessionPayload.summary ?? null;
-      state.accountability = sessionPayload.accountability ?? null;
       state.sessionTotal = Number.isFinite(sessionPayload.total) ? sessionPayload.total : state.sessions.length;
       state.sessionLimit = Number.isFinite(sessionPayload.limit) && sessionPayload.limit > 0 ? sessionPayload.limit : 200;
       if (state.selectedSessionId && !state.sessions.some((session) => session.id === state.selectedSessionId)) {
@@ -877,7 +783,7 @@
       renderAll();
       await Promise.all([
         refreshOwnership(),
-        refreshMessages({ reconcile: isOwner() }),
+        refreshMessages(),
         ...(quiet ? [] : [loadAttribution(selectedSession()?.id, { reset: true })]),
       ]);
       if (!quiet) toast('Board refreshed.');
@@ -968,10 +874,7 @@
     if (generation !== state.generation) return;
     state.principal = me.principal;
     showConnection(true);
-    clearInterval(state.timer);
-    state.timer = null;
     await refresh({ quiet: true });
-    if (generation === state.generation && state.token && !document.hidden) state.timer = setInterval(() => refresh({ quiet: true }), 30000);
   }
 
   function disconnect() {
@@ -980,8 +883,6 @@
     state.controllers.clear();
     state.refreshing = false;
     state.refreshRequested = false;
-    clearInterval(state.timer);
-    state.timer = null;
     state.token = null;
     state.principal = null;
     state.sessions = [];
@@ -1007,12 +908,6 @@
     el.machineFilter.value = '';
     el.branchFilter.value = '';
     state.sessionSummary = null;
-    state.accountability = null;
-    state.lifecycleDrafts = {};
-    el.attentionFilter.value = '';
-    el.metrics.textContent = '';
-    el.observerValue.value = '';
-    el.observerCredential.hidden = true;
     el.statusFilter.value = 'ALL';
     el.staleFilter.checked = false;
     el.tokenValue.textContent = '';
@@ -1094,10 +989,6 @@
   el.machineFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.branchFilter.addEventListener('change', () => refresh({ quiet: true }));
   el.statusFilter.addEventListener('change', () => { renderSessions(); refresh({ quiet: true }); });
-  el.attentionFilter.addEventListener('change',()=>{renderSummary();renderSessions();refresh({quiet:true});});
-  for(const [id,category] of [['ready','READY'],['reconcile','RECONCILE'],['cleanup','CLEANUP']])$('summary-'+id).addEventListener('click',()=>{el.attentionFilter.value=el.attentionFilter.value===category?'':category;renderSummary();renderSessions();refresh({quiet:true});});
-  $('dismiss-observer-credential').addEventListener('click',()=>{el.observerValue.value='';el.observerCredential.hidden=true;});
-  $('save-observer-credential').addEventListener('click',()=>{if(!el.observerValue.value)return;const url=URL.createObjectURL(new Blob([el.observerValue.value],{type:'application/json'})),link=node('a');link.href=url;link.download='agent-hub-observer.private.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
   el.staleFilter.addEventListener('change', () => { renderSessions(); refresh({ quiet: true }); });
   for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaitingUser, 'WAITING_ON_USER'], [el.summaryWaitingAgent, 'WAITING_ON_AGENT'], [el.summaryBlocked, 'BLOCKED']]) {
     chip.addEventListener('click', () => {
@@ -1238,12 +1129,4 @@
     el.tokenPanel.hidden = true;
   });
 
-  document.addEventListener('visibilitychange', () => {
-    clearInterval(state.timer);
-    state.timer = null;
-    if (state.token && !document.hidden) {
-      refresh({ quiet: true });
-      state.timer = setInterval(() => refresh({ quiet: true }), 30000);
-    }
-  });
 })();

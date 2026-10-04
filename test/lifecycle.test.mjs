@@ -66,12 +66,13 @@ test('observer is exact-scope, read-only, time bounded and sequence ordered',asy
  assert.equal((await f.call(f.actor.token,`/sessions/${f.s.id}/checkpoint`)).body.lifecycle.coverage,'revoked');
 });
 
-test('scheduler overlap sends one exact inbox check-in and checkpoint resolves it',async t=>{
+test('scheduler does not send messages; an explicit check-in is deduplicated and resolved',async t=>{
  const f=await setup(t);await checkpoint(f,cp({nextAction:null,wait:{kind:'external',reason:'Synthetic event'}}));
  const policy=await f.call(OWNER,`/sessions/${f.s.id}/accountability-policy`,{checkInEnabled:true});assert.equal(policy.status,200);
  await Promise.all([worker.scheduled({cron:'* * * * *',scheduledTime:Date.now()},f.env),worker.scheduled({cron:'* * * * *',scheduledTime:Date.now()},f.env)]);
  await worker.scheduled({cron:'* * * * *',scheduledTime:Date.now()},f.env);
- assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM messages').get().n,1);
+ assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM messages').get().n,0);
+ const explicit=await f.call(OWNER,`/sessions/${f.s.id}/check-in`,{expectedRevision:1});assert.equal(explicit.status,201);
  const inbox=(await f.call(f.actor.token,`/messages?sessionId=${f.s.id}`)).body.messages;
  assert.equal(inbox.length,1);assert.match(inbox[0].body,/Preserve current work/);assert.ok(inbox[0].deliveryCursor);
  assert.equal((await f.call(OWNER,`/sessions/${f.s.id}/check-in`,{expectedRevision:1})).body.reused,true);

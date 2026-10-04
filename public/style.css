@@ -128,8 +128,6 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 
 .welcome-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin: 2px 0 24px; }
 .welcome-row .muted { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
-.poll-note { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 10px; }
-.live-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--success); }
 .summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
 .summary-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); color: var(--text); text-align: left; }
 .summary-card:hover { border-color: var(--accent); background: var(--surface-raised); }
@@ -269,7 +267,6 @@ select, .filters select { appearance: none; padding-right: 36px; background-imag
   .connect-panel { grid-template-columns: 1fr; gap: 22px; margin-top: 3vh; padding: 24px 18px; }
   .welcome-row { align-items: flex-start; flex-direction: column; gap: 12px; }
   .welcome-tools { justify-items: start; }
-  .poll-note { font-size: 9px; }
   .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .summary-card { padding: 12px; }
   .summary-card span { font-size: 10px; }
@@ -310,15 +307,11 @@ select, .filters select { appearance: none; padding-right: 36px; background-imag
 .summary-waiting-user { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); }
 .summary-waiting-user strong, .summary-waiting-user span { color: var(--warning); }
 .session-card.needs-user { background: color-mix(in srgb, var(--warning) 6%, var(--surface-raised)); }
-.accountability-summary { margin-bottom: 24px; }
-#accountability-metrics { margin: 12px 0 0; line-height: 1.6; }
-.accountability-chips { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
 .session-next-action { font-weight: 600; overflow-wrap: anywhere; }
-.attention-label { font-size: 11px; font-weight: 700; color: var(--accent); }
-.attention-waiting_user, .attention-reconcile { color: var(--warning); }
-.lifecycle-actions { display: grid; gap: 12px; margin: 16px 0; }
-.lifecycle-panel { margin-top: 16px; }
-@media (max-width: 600px) { .accountability-chips { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; } .accountability-chips .summary-card { padding: 10px; } }
 .status-waiting_on_user { background: color-mix(in srgb, var(--warning) 14%, var(--surface)); }
 .summary-stale strong, .stale-chip { color: var(--muted); }
 .stale-chip { background: var(--surface-soft); }
+
+.refresh-note { color: var(--muted); font-size: 11px; margin: 0; }
+
+.detail-columns.claims-only { grid-template-columns: 1fr; }

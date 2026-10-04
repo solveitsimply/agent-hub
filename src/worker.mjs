@@ -1,6 +1,6 @@
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
-import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint, reconcile } from './lifecycle.mjs';
+import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint } from './lifecycle.mjs';
 import { lifecycleApi, observerApi } from './lifecycle-api.mjs';
 import { attributionLabels, canonicalAgentName, agentNameSql, machineAliases, canonicalMachine, machineFilterValues, ENVIRONMENTS, parseWorkContext } from './session-context.mjs';
 const STATUSES = new Set(['RUNNING','WAITING_ON_USER','WAITING_ON_AGENT','BLOCKED','DONE']);
@@ -89,6 +89,9 @@ const sessionView = (row,principal,aliases)=>{
 const segmentView=row=>attributionView(row);
 const SESSION_FROM=' FROM sessions s JOIN principals p ON p.id=s.principal_id LEFT JOIN session_attribution_segments a ON a.id=(SELECT id FROM session_attribution_segments WHERE session_id=s.id ORDER BY id DESC LIMIT 1)';
 const SESSION_SELECT='SELECT s.*,p.name AS principal_name,p.account,a.metadata_json AS latest_attribution_json'+LIFECYCLE_COLUMNS+SESSION_FROM;
+// Count claims once for discovery, rather than scanning ownership for each card.
+// This works before the optional read-efficiency indexes have been installed.
+const SESSION_LIST_SELECT='SELECT s.*,p.name AS principal_name,p.account,a.metadata_json AS latest_attribution_json'+LIFECYCLE_COLUMNS.replace('(SELECT COUNT(*) FROM ownership WHERE owner_session_id=s.id) AS held_claims','COALESCE(claims.total,0) AS held_claims')+SESSION_FROM+' LEFT JOIN (SELECT owner_session_id,COUNT(*) AS total FROM ownership GROUP BY owner_session_id) claims ON claims.owner_session_id=s.id';
 const AGENT_NAME_SQL=agentNameSql("json_extract(a.metadata_json,'$.client')");
 const sessionFilters = (url,aliases)=>{
   const clauses=[],values=[];
@@ -115,7 +118,7 @@ async function sessionById(db,id,principal,own=false){
 const MESSAGE_SELECT='SELECT m.*,sender.name AS sender_name,recipient.name AS recipient_name FROM messages m JOIN principals sender ON sender.id=m.from_principal_id JOIN principals recipient ON recipient.id=m.to_principal_id';
 const messageView=(row,principal)=>({id:row.id,fromSessionId:row.from_session_id,toSessionId:row.to_session_id,fromPrincipalId:row.from_principal_id,toPrincipalId:row.to_principal_id,fromPrincipalName:row.sender_name,toPrincipalName:row.recipient_name,project:row.project,kind:row.kind,body:principal.role==='owner'||(row.review_state==='APPROVED'&&row.to_session_id!==null)?row.body:null,replyTo:row.reply_to,createdAt:row.created_at,acknowledgedAt:row.acknowledged_at,reviewState:row.review_state,reviewedAt:row.reviewed_at,deliveryCursor:row.delivery_id,...(principal.role==='owner'?{payloadHash:row.payload_hash}:{})});
 const requireActive=session=>{if(session?.archived_at)fail(409,'SESSION_ARCHIVED','This session was archived; register a new session for new work.');};
-const audit=(db,principal,action,id)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND (SELECT COUNT(*) FROM audit_events WHERE principal_id=?)<10000 AND (SELECT COUNT(*) FROM audit_events)<100000 AND NOT EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?)`).bind(principal.id,action,String(id),now(),principal.id,principal.id,principal.id,action,String(id),dayAgo());
+const audit=(db,principal,action,id)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND CASE WHEN EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?) THEN 0 ELSE (SELECT COUNT(*)<100000 AND COUNT(*) FILTER (WHERE principal_id=?)<10000 FROM audit_events) END`).bind(principal.id,action,String(id),now(),principal.id,principal.id,action,String(id),dayAgo(),principal.id);
 async function messageById(db,id,principal){
   const row=await db.prepare(`${MESSAGE_SELECT} WHERE m.id=?`).bind(id).first();
   if(!row)fail(404,'MESSAGE_NOT_FOUND','Message not found.');requireProject(principal,row.project);
@@ -168,27 +171,25 @@ async function api(request,env){
     if(project){scope+=' AND s.project=?';scopeValues=[project];}
     else if(principal.role!=='owner'){scope+=` AND s.project IN (${principal.projects.map(()=>'?').join(',')})`;scopeValues=principal.projects;}
     const filters=sessionFilters(url,aliases),filteredScope=scope+(filters.clauses.length?' AND '+filters.clauses.join(' AND '):''),filterValues=[...scopeValues,...filters.values];
-    let where=filteredScope,values=[...filterValues];
-    const status=url.searchParams.get('status');if(status!==null){if(status==='WAITING')where+=" AND s.status IN ('WAITING_ON_USER','WAITING_ON_AGENT')";else{if(!STATUSES.has(status))fail(422,'INVALID_FILTER','Select a supported status.');where+=' AND s.status=?';values.push(status);}}
-    const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null){if(staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');where+=" AND s.status!='DONE' AND (julianday(?) - julianday(s.last_seen_at))*86400 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3";values.push(now());}
+    const status=url.searchParams.get('status');if(status!==null&&status!=='WAITING'&&!STATUSES.has(status))fail(422,'INVALID_FILTER','Select a supported status.');
+    const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null&&staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');
     const attention=url.searchParams.get('attention');if(attention!==null&&!ATTENTION.includes(attention))fail(422,'INVALID_FILTER','Select a supported attention category.');
-    const rows=await db.prepare(SESSION_SELECT+where+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 2000').bind(...values).all();
-    const ordered=rows.results.map(row=>sessionView(row,principal,aliases)).filter(session=>!attention||session.lifecycle.attention===attention).sort((a,b)=>ATTENTION.indexOf(a.lifecycle.attention)-ATTENTION.indexOf(b.lifecycle.attention));
+    // Admission caps the workspace at 2000 active sessions. Read this authorized
+    // baseline once; all counts precede the response page and status filters.
+    const rows=await db.prepare(SESSION_LIST_SELECT+filteredScope+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 2000').bind(...filterValues).all();
+    const baseline=rows.results.map(row=>sessionView(row,principal,aliases));
+    const ordered=baseline.filter(session=>(status===null||(status==='WAITING'?['WAITING_ON_USER','WAITING_ON_AGENT'].includes(session.status):session.status===status))&&(staleOnly===null||(session.stale&&session.status!=='DONE'))&&(!attention||session.lifecycle.attention===attention));
     const total=ordered.length;
     if(view==='compact')return json({sessions:ordered.slice(0,limit).map(compactSession),limit,total,hasMore:total>limit});
-    const options=await db.prepare(`SELECT DISTINCT s.machine,s.environment,${AGENT_NAME_SQL} AS agent_name,json_extract(a.metadata_json,'$.model') AS agent_model,json_extract(s.details_json,'$.workContext.repository') AS repository,json_extract(s.details_json,'$.workContext.branch') AS branch`+SESSION_FROM+scope).bind(...scopeValues).all();
+    const options=filters.clauses.length
+      ? await db.prepare(`SELECT DISTINCT s.machine,s.environment,${AGENT_NAME_SQL} AS agent_name,json_extract(a.metadata_json,'$.model') AS agent_model,json_extract(s.details_json,'$.workContext.repository') AS repository,json_extract(s.details_json,'$.workContext.branch') AS branch`+SESSION_FROM+scope).bind(...scopeValues).all()
+      : {results:baseline.map(session=>({machine:session.machine,environment:session.environment,agent_name:session.latestAttribution?.client??null,agent_model:session.latestAttribution?.model??null,repository:session.workContext?.repository??null,branch:session.workContext?.branch??null}))};
     const distinct=key=>[...new Set(options.results.map(row=>row[key]??null))].sort((left,right)=>left===null?1:right===null?-1:left.localeCompare(right));
     const machines=[...new Set(options.results.map(row=>canonicalMachine(row.machine,aliases)))].sort((a,b)=>a===null?1:b===null?-1:a.localeCompare(b));
     const branches=[...new Map(options.results.map(row=>{const value=row.repository&&row.branch?{repository:row.repository,branch:row.branch}:null;return [JSON.stringify(value),value];})).values()];
-    const summaryRows=await db.prepare("SELECT s.status,COUNT(*) AS total,SUM(CASE WHEN (julianday(?) - julianday(s.last_seen_at))*86400 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3 THEN 1 ELSE 0 END) AS stale"+SESSION_FROM+filteredScope+' GROUP BY s.status').bind(now(),...filterValues).all();
-    const summary={RUNNING:0,WAITING_ON_USER:0,WAITING_ON_AGENT:0,BLOCKED:0,DONE:0,stale:0};for(const row of summaryRows.results){summary[row.status]=row.total;if(row.status!=='DONE')summary.stale+=row.stale;}
-    // A complete unfiltered-status page already has every accountability row.
-    // Keep the independent scan for narrowed or capped pages so their summary
-    // still covers the original filter scope, rather than only displayed rows.
-    const all=status===null&&staleOnly===null&&rows.results.length<2000
-      ? rows : await db.prepare(SESSION_SELECT+filteredScope+' LIMIT 2000').bind(...filterValues).all();
-    const accountability={categories:Object.fromEntries(ATTENTION.map(key=>[key,0])),unaccounted:0,oldestUnaccountedAt:null,checkpointCoverage:0,observerCoverage:0,total:all.results.length,unaccountedClaims:0};
-    for(const row of all.results){const value=lifecycleView(row);accountability.categories[value.attention]++;if(value.checkpoint)accountability.checkpointCoverage++;if(value.coverage==='available')accountability.observerCoverage++;if(value.unaccounted){accountability.unaccounted++;accountability.unaccountedClaims+=value.heldClaims;if(!accountability.oldestUnaccountedAt||value.unaccountedSince<accountability.oldestUnaccountedAt)accountability.oldestUnaccountedAt=value.unaccountedSince;}}
+    const summary={RUNNING:0,WAITING_ON_USER:0,WAITING_ON_AGENT:0,BLOCKED:0,DONE:0,stale:0};
+    const accountability={categories:Object.fromEntries(ATTENTION.map(key=>[key,0])),unaccounted:0,oldestUnaccountedAt:null,checkpointCoverage:0,observerCoverage:0,total:baseline.length,unaccountedClaims:0};
+    for(const session of baseline){summary[session.status]++;if(session.status!=='DONE'&&session.stale)summary.stale++;const value=session.lifecycle;accountability.categories[value.attention]++;if(value.checkpoint)accountability.checkpointCoverage++;if(value.coverage==='available')accountability.observerCoverage++;if(value.unaccounted){accountability.unaccounted++;accountability.unaccountedClaims+=value.heldClaims;if(!accountability.oldestUnaccountedAt||value.unaccountedSince<accountability.oldestUnaccountedAt)accountability.oldestUnaccountedAt=value.unaccountedSince;}}
     return json({sessions:ordered.slice(0,limit),limit,total,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
   }
   if(path==='/api/sessions'&&method==='POST'){
@@ -268,7 +269,7 @@ async function api(request,env){
     const payloadHash=await digest(JSON.stringify({from:from?.id??null,to:to?.id??null,project,kind:body.kind,body:text,replyTo}));
     const date=now();
     await db.batch([
-      db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,reply_to,created_at,review_state,reviewed_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (SELECT COUNT(*) FROM messages WHERE from_principal_id=?)<1000 AND (SELECT COUNT(*) FROM messages)<10000 AND (SELECT COUNT(*) FROM messages WHERE from_principal_id=? AND created_at>=?)<500 AND (SELECT COUNT(*) FROM messages WHERE created_at>=?)<5000 ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(principal.id,recipient,from?.id??null,to?.id??null,project,body.kind,text,key,payloadHash,replyTo,date,'APPROVED',null,principal.id,recipient,principal.id,project,recipient,project,from?.id??null,from?.id??null,principal.id,project,to?.id??null,to?.id??null,recipient,project,principal.id,principal.id,dayAgo(),dayAgo()),
+      db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,reply_to,created_at,review_state,reviewed_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (SELECT COUNT(*)<10000 AND COUNT(*) FILTER (WHERE from_principal_id=?)<1000 AND COUNT(*) FILTER (WHERE created_at>=?)<5000 AND COUNT(*) FILTER (WHERE from_principal_id=? AND created_at>=?)<500 FROM messages) ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(principal.id,recipient,from?.id??null,to?.id??null,project,body.kind,text,key,payloadHash,replyTo,date,'APPROVED',null,principal.id,recipient,principal.id,project,recipient,project,from?.id??null,from?.id??null,principal.id,project,to?.id??null,to?.id??null,recipient,project,principal.id,dayAgo(),principal.id,dayAgo()),
       db.prepare(`INSERT INTO message_deliveries(message_id) SELECT id FROM messages WHERE from_principal_id=? AND idempotency_key=? AND review_state='APPROVED' AND to_session_id IS NOT NULL AND ${ACTIVE_PRINCIPAL} ON CONFLICT(message_id) DO NOTHING`).bind(principal.id,key,principal.id),
       db.prepare(`UPDATE messages SET delivery_id=(SELECT id FROM message_deliveries WHERE message_id=messages.id) WHERE from_principal_id=? AND idempotency_key=? AND review_state='APPROVED' AND to_session_id IS NOT NULL AND ${ACTIVE_PRINCIPAL}`).bind(principal.id,key,principal.id),
     ]);
@@ -346,7 +347,8 @@ export default {
     }
   },
   async scheduled(_event,env){
-    await reconcile(env.DB.withSession('first-primary'),SESSION_SELECT,{digest,fail});
+    // Old minute triggers may briefly survive a rollout. They must do no work
+    // except the existing daily retention window, and never send check-ins.
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCHours()!==3)return;
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCMinutes()!==17)return;
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();

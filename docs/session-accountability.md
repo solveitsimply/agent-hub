@@ -45,17 +45,23 @@ Use `--watch` only after verifying authority. Polling needs no model calls, norm
 
 Some desktops expose no control socket. Keep coverage unavailable and use read-only app tools for an operator audit. Do not inspect private databases, restart chats or install another daemon to simulate visibility. Automatic native continuation is a later capability enrollment requiring exact authority, selected objective/effects, budgets, quiet hours and tested stop conditions. This release offers a native-chat link and has no automatic native resumer.
 
-## Reconciliation
+## Explicit compatibility operations
 
 Priority: Waiting on User, Ready, Needs reconciliation, agent/event waits, Working, Paused; DONE uses a separate closeout category. Summary counts/filtering cover the full dataset before the 200-card limit. The main measure is unfinished sessions lacking observed execution or a current accountable next action. Report and observer coverage expose uncertainty.
 
-Owners can send one eligible check-in or opt an exact session into automatic Hub check-ins. Default: disabled. Check-ins use its existing enrolled inbox, author “Hub accountability”; they neither impersonate the owner nor start native turns. No owner credential goes to services/observers.
+Owners can explicitly send one eligible check-in through the API. Stored opt-in policies are retained for compatibility but do not schedule messages. Check-ins use its existing enrolled inbox, author “Hub accountability”; they neither impersonate the owner nor start native turns. No owner credential goes to services/observers.
 
 Defaults: five-minute deadline grace; legacy eligibility after three minutes without a report. Active execution, user decisions, pauses, paused/budget-limited/failed goals, offline/revoked observers and DONE suppress questions. Explicitly enrolled unmapped legacy chats can receive one classification question; delivery does not establish reachability.
 
-Episode key: session + material revision. Scheduler overlap/HTTP retry share one inbox message. Writes recheck revision, custody, native state and policy. Episodes prevent redispatch after message retention. Default ceiling: one per rolling day, owner maximum three. Unanswered delivery can escalate after fifteen minutes only while native coverage is available. No blind retries, timer-based DONE, foreign claim release or automatic archive.
+Episode key: session + material revision. Explicit HTTP retries share one inbox message. Writes recheck revision, custody, native state and policy. Episodes prevent redispatch after message retention. Default ceiling: one per rolling day, owner maximum three. Unanswered delivery can escalate after fifteen minutes only while native coverage is available. No blind retries, timer-based DONE, foreign claim release or automatic archive.
 
-Set the existing Worker's cron to `* * * * *` for prompt processing, or retain less frequent scheduling. Only opted-in sessions are processed; no new cloud service/resource or model call. Owner `POST /api/reconcile` with `{}` runs immediately. Minute-cron retention runs at 03:17 UTC. Use the existing Worker allocation and installation cost policy.
+The only scheduled operation is retention at `17 3 * * *` (03:17 UTC).
+It does not enumerate sessions or send messages. Owner `POST /api/reconcile`
+remains an explicit compatibility operation; it is absent from the dashboard.
+The dashboard shows status, reported next actions/waits, inbox and ownership;
+it has no accountability counters, checkpoint/closeout forms, native-observer
+enrollment or automatic check-in controls. Existing data and scoped APIs remain
+available for clients already using them.
 
 ## Closeout
 
