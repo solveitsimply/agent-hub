@@ -24,6 +24,17 @@ The server stamps receipt/revision; conditional writes reject obsolete revisions
 
 Wait kinds are `user`, `agent`, `external`, `scheduled`. Every wait needs a reason and next check time. Agent dependencies can reference another session in the same project. Its DONE report makes an observed idle chat with a next action “Ready”; independently verify acceptance evidence. `pauseReason` records a pause; `completionEvidence` holds up to twelve short references. `presenceIntervalSeconds` is only for clients implementing that periodic contract. Legacy clients keep boundary reporting.
 
+Session cards show the reported blocking or waiting reason, the expected event,
+next check time (including overdue checks), and next action. For agent waits,
+set `wait.sessionId` to the other session's full Hub ID; its current title,
+reported agent app, machine and status appear even when it is outside the current
+list filters. These dependency details remain restricted to the same project.
+Missing reasons, linked agents, next checks and next actions are labelled as
+not reported; the UI never infers them from task prose. For a blocked session,
+record its prerequisite in `wait.reason` with the appropriate wait kind, or use
+`pauseReason` for an actual pause. A completed dependency report still requires
+verification of its acceptance evidence.
+
 ## Read-only native observation
 
 The owner selects exact session/native-ID mappings and issues an expiring observer credential. It can read only its mappings and report native state, never read inboxes, discover other sessions, change reported status, claim resources, start turns or archive chats. Principal/owner tokens are refused by the observer endpoint. Revocation, expiry and archival apply at the write boundary. Replacing an active mapping requires revocation. Save credentials only in private configuration with restrictive permissions.

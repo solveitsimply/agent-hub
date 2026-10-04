@@ -132,6 +132,26 @@ test('dependency completion offers continuation but never changes native state o
  assert.equal(f.DB.database.prepare('SELECT state FROM observer_sessions').get().state,'idle');
 });
 
+test('dependency identity stays project scoped and available outside session filters',async t=>{
+ const f=await setup(t);
+ const peer=(await f.call(OWNER,'/principals',{name:'Release peer',account:'peer@example.test',projects:['demo']})).body;
+ const dependency=(await f.call(peer.token,'/sessions',{externalId:'claude:release-peer',machine:'release-peer-host',label:'Release owner',project:'demo',task:'Run fixture release',status:'RUNNING'})).body.session;
+ await f.call(peer.token,`/sessions/${dependency.id}/attribution`,{provider:'Synthetic provider',client:'Claude',previousSegmentId:null,idempotencyKey:'fixture-peer-attribution'});
+ await checkpoint(f,cp({wait:{kind:'agent',reason:'Await successful release',sessionId:dependency.id}}));
+ await f.call(f.actor.token,`/sessions/${f.s.id}`,{status:'WAITING_ON_AGENT'},'PATCH');
+ const visible=(await f.call(f.actor.token,'/sessions?status=WAITING_ON_AGENT')).body.sessions;
+ assert.equal(visible.length,1);assert.equal(visible[0].id,f.s.id);
+ assert.deepEqual(visible[0].lifecycle.dependency,{sessionId:dependency.id,label:'Release owner',status:'RUNNING',machine:'release-peer-host',agentName:'Claude'});
+ await f.call(peer.token,`/sessions/${dependency.id}`,{label:'Renamed release owner'},'PATCH');
+ assert.equal((await f.call(f.actor.token,`/sessions/${f.s.id}/checkpoint`)).body.lifecycle.dependency.label,'Renamed release owner');
+ assert.equal((await f.call(peer.token,`/sessions/${f.s.id}/checkpoint`)).body.lifecycle.dependency.sessionId,dependency.id);
+ const foreign=(await f.call(f.other.token,'/sessions',{externalId:'private-dependency',machine:'private-host',label:'Private title',project:'other',task:'Private fixture',status:'RUNNING'})).body.session;
+ assert.equal((await checkpoint(f,cp({wait:{kind:'agent',reason:'Invalid foreign dependency',sessionId:foreign.id}}))).status,403);
+ f.DB.database.prepare('UPDATE sessions SET checkpoint_json=? WHERE id=?').run(JSON.stringify(cp({wait:{kind:'agent',reason:'Corrupt historical reference',sessionId:foreign.id}})),f.s.id);
+ assert.equal((await f.call(f.actor.token,`/sessions/${f.s.id}/checkpoint`)).body.lifecycle.dependency,null);
+ assert.equal((await f.call(f.other.token,`/sessions/${f.s.id}/checkpoint`)).status,403);
+});
+
 test('partial closeout stays visible, requires retained triggers and never deletes work or claims',async t=>{
  const f=await setup(t);await checkpoint(f);await f.call(f.actor.token,'/ownership/claim',{sessionId:f.s.id,resourceKey:'fixture'});await f.call(f.actor.token,`/sessions/${f.s.id}`,{status:'DONE'},'PATCH');
  const body={expectedRevision:2,objective:{state:'verified',evidence:'Synthetic acceptance complete'},workspace:{state:'retained',evidence:'Fixture evidence retained',revisitAt:'After audit'},nativeChat:{state:'retained',evidence:'Owner keeping chat',revisitAt:'Owner archive review'}};

@@ -165,6 +165,12 @@ select, .filters select { appearance: none; padding-right: 36px; background-imag
 .session-card-top, .session-meta, .session-labels { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .session-project { min-width: 0; overflow: hidden; color: var(--accent); font-size: 10px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
 .session-title { overflow-wrap: anywhere; font-size: 14px; line-height: 1.4; }
+.session-wait-summary { display: grid; gap: 6px; min-width: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--warning) 5%, var(--surface)); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.session-wait-heading, .session-wait-missing { color: var(--warning); }
+.session-wait-blocked { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
+.session-wait-blocked .session-wait-heading { color: var(--danger); }
+.session-wait-agent { font-weight: 750; }
+.session-wait-id, .session-wait-context { color: var(--muted); font-size: 10px; }
 .session-task { overflow-wrap: anywhere; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .session-labels, .session-meta { justify-content: flex-start; flex-wrap: wrap; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .session-origin { overflow-wrap: anywhere; }
@@ -304,7 +310,8 @@ select, .filters select { appearance: none; padding-right: 36px; background-imag
 .summary-waiting-user { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); }
 .summary-waiting-user strong, .summary-waiting-user span { color: var(--warning); }
 .session-card.needs-user { background: color-mix(in srgb, var(--warning) 6%, var(--surface-raised)); }
-.accountability-summary { margin-bottom: 18px; }
+.accountability-summary { margin-bottom: 24px; }
+#accountability-metrics { margin: 12px 0 0; line-height: 1.6; }
 .accountability-chips { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
 .session-next-action { font-weight: 600; overflow-wrap: anywhere; }
 .attention-label { font-size: 11px; font-weight: 700; color: var(--accent); }

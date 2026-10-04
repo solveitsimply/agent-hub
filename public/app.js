@@ -303,6 +303,36 @@
     el.metrics.textContent=a ? `${a.unaccounted} unfinished session${a.unaccounted===1?' needs':'s need'} follow-up · ${a.unaccountedClaims} held claims · next-action reports ${a.checkpointCoverage}/${a.total} · native observation ${a.observerCoverage}/${a.total}${a.oldestUnaccountedAt ? ' · oldest '+formatTime(a.oldestUnaccountedAt):''}` : '';
   }
 
+  function sessionWaitSummary(session) {
+    if (session.status === 'DONE') return null;
+    const life = session.lifecycle;
+    const checkpoint = life?.checkpoint;
+    const wait = checkpoint?.wait;
+    const blocked = session.status === 'BLOCKED';
+    const kind = wait?.kind || (session.status === 'WAITING_ON_USER' || life?.attention === 'WAITING_USER' ? 'user' : session.status === 'WAITING_ON_AGENT' ? 'agent' : null);
+    if (!blocked && !kind) return null;
+    const labels = { user: 'Waiting on user', agent: 'Waiting on agent', external: 'Waiting on external event', scheduled: 'Waiting for scheduled check' };
+    const summary = node('span', `session-wait-summary${blocked ? ' session-wait-blocked' : ''}`);
+    summary.append(node('strong', 'session-wait-heading', blocked ? `Blocked${kind ? ' · ' + labels[kind].toLowerCase() : ''}` : labels[kind]));
+    const reason = wait?.reason || (blocked ? checkpoint?.pauseReason : null);
+    summary.append(node('span', reason ? 'session-wait-reason' : 'session-wait-missing', reason || (blocked ? 'Blocker not reported. This session needs to explain what prevents progress.' : kind === 'user' ? 'Requested user decision or action not reported.' : 'Specific waiting reason not reported.')));
+    if (kind === 'agent') {
+      if (wait?.sessionId) {
+        const dependency = life?.dependency?.sessionId === wait.sessionId ? life.dependency : state.sessions.find(item => item.id === wait.sessionId && item.project === session.project);
+        summary.append(node('span', 'session-wait-agent', `Agent session: ${dependency?.label || 'Session name unavailable'}`));
+        summary.append(node('span', 'session-wait-id', `Session ID: ${wait.sessionId}`));
+        const agentName = dependency?.agentName || dependency?.latestAttribution?.client;
+        if (agentName || dependency?.machine) summary.append(node('span', 'session-wait-context', [agentName, dependency?.machine].filter(Boolean).join(' · ')));
+        if (dependency?.status) summary.append(node('span', 'session-wait-context', `Dependency reports: ${STATUS_LABELS[dependency.status] || dependency.status}${dependency.status === 'DONE' ? ' — verify its completion evidence' : ''}`));
+      } else summary.append(node('span', 'session-wait-missing', 'Agent not identified. No other session has been linked.'));
+    }
+    if (wait?.expectedEvent) summary.append(node('span', 'session-wait-event', `Needed to continue: ${wait.expectedEvent}`));
+    if (checkpoint?.nextCheckAt) summary.append(node('span', 'session-wait-context', `Next check: ${formatTime(checkpoint.nextCheckAt)}${life?.overdue ? ' · Overdue' : ''}`));
+    else summary.append(node('span', 'session-wait-missing', 'Next check not reported.'));
+    summary.append(node('span', checkpoint?.nextAction ? 'session-wait-action' : 'session-wait-missing', checkpoint?.nextAction ? `Next action: ${checkpoint.nextAction}` : 'Next action not reported.'));
+    return summary;
+  }
+
   function renderSessions() {
     for (const [chip, status] of [[el.summaryRunning, 'RUNNING'], [el.summaryWaitingUser, 'WAITING_ON_USER'], [el.summaryWaitingAgent, 'WAITING_ON_AGENT'], [el.summaryBlocked, 'BLOCKED']]) {
       chip.setAttribute('aria-pressed', String(el.statusFilter.value === status));
@@ -328,6 +358,7 @@
       const top = node('div', 'session-card-top');
       top.append(node('span', 'session-project', session.project), statusBadge(session.status));
       const title = node('strong', 'session-title', session.label || 'Session title not set');
+      const waitSummary = sessionWaitSummary(session);
       const task = node('span', 'session-task', `Task: ${session.task || 'No task description'}`);
       const labels = node('span', 'session-labels');
       labels.append(
@@ -336,17 +367,20 @@
       );
       const meta = node('span', 'session-meta', `Environment: ${session.environment || 'Unknown'} · seen ${formatTime(session.lastSeenAt)}`);
       if (session.workContext) labels.append(node('span', 'session-origin', `${session.workContext.repository} · ${session.workContext.branch || 'Detached'}${session.workContext.commit ? ' · ' + session.workContext.commit.slice(0, 8) : ''}`));
+      card.append(top, title);
+      if (waitSummary) card.append(waitSummary);
+      card.append(task, labels, meta);
       if (session.stale && session.status !== 'DONE') {
         const stale = node('span', 'stale-chip', 'Not recently seen');
         stale.title = 'No Hub update for more than three minutes; work may still be running or waiting.';
-        card.append(top, title, task, labels, meta, stale);
-      } else card.append(top, title, task, labels, meta);
+        card.append(stale);
+      }
       if(session.lifecycle){
         const life=session.lifecycle;
         card.append(node('span',`attention-label attention-${life.attention.toLowerCase()}`,ATTENTION_LABELS[life.attention]));
-        card.append(node('span','session-next-action',life.checkpoint?.wait?.reason || life.checkpoint?.nextAction || life.reason));
+        if (!waitSummary) card.append(node('span','session-next-action',life.checkpoint?.nextAction || life.reason));
         if(life.checkpoint?.waitStartedAt)card.append(node('span','muted small','Waiting since '+formatTime(life.checkpoint.waitStartedAt)));
-        card.append(node('span','muted small',`Native coverage: ${life.coverage.replaceAll('_',' ')}${life.checkpoint?.nextCheckAt ? ' · next check '+formatTime(life.checkpoint.nextCheckAt):''}`));
+        card.append(node('span','muted small',`Native coverage: ${life.coverage.replaceAll('_',' ')}${!waitSummary && life.checkpoint?.nextCheckAt ? ' · next check '+formatTime(life.checkpoint.nextCheckAt):''}`));
       }
       card.addEventListener('click', () => selectSession(session.id));
       const copy = node('button', 'button button-quiet button-small session-copy', 'Copy session name & ID');

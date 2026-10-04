@@ -49,7 +49,7 @@ export const LIFECYCLE_COLUMNS = `,
  (SELECT json_object('checkInEnabled',ap.check_in_enabled,'graceSeconds',ap.grace_seconds,'dailyLimit',ap.daily_limit,'escalationSeconds',ap.escalation_seconds) FROM accountability_policies ap WHERE ap.session_id=s.id) AS policy_json,
  (SELECT json_object('revision',ci.revision,'messageId',ci.message_id,'createdAt',ci.created_at,'resolvedAt',ci.resolved_at,'acknowledgedAt',m.acknowledged_at) FROM session_check_ins ci LEFT JOIN messages m ON m.id=ci.message_id WHERE ci.session_id=s.id ORDER BY ci.revision DESC LIMIT 1) AS check_in_json,
  (SELECT COUNT(*) FROM ownership WHERE owner_session_id=s.id) AS held_claims,
- (SELECT json_object('sessionId',d.id,'status',d.status) FROM sessions d WHERE d.id=json_extract(s.checkpoint_json,'$.wait.sessionId') AND d.project=s.project) AS dependency_json`;
+ (SELECT json_object('sessionId',d.id,'label',d.label,'status',d.status,'machine',d.machine,'agentName',(SELECT json_extract(a.metadata_json,'$.client') FROM session_attribution_segments a WHERE a.session_id=d.id ORDER BY a.id DESC LIMIT 1)) FROM sessions d WHERE d.id=json_extract(s.checkpoint_json,'$.wait.sessionId') AND d.project=s.project) AS dependency_json`;
 
 export function parseCheckpoint(value, {fail,checkKeys,string}, time=Date.now()) {
   if(!value || typeof value !== 'object' || Array.isArray(value))fail(422,'INVALID_CHECKPOINT','Provide a structured checkpoint.');
