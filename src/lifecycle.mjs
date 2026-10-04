@@ -107,7 +107,7 @@ export async function sendCheckIn(db,row,{digest,fail},time=Date.now(),automatic
 }
 
 export async function reconcile(db,select,helpers,time=Date.now()) {
-  const rows=await db.prepare(select+` WHERE s.archived_at IS NULL AND s.status!='DONE' AND p.active=1 AND EXISTS(SELECT 1 FROM accountability_policies ap WHERE ap.session_id=s.id AND ap.check_in_enabled=1 AND (SELECT COUNT(*) FROM session_check_ins ci WHERE ci.session_id=s.id AND ci.created_at>=?)<ap.daily_limit) ORDER BY s.created_at LIMIT 2000`).bind(new Date(time-86400000).toISOString()).all();
+  const rows=await db.prepare(select+` JOIN accountability_policies enrolled_ap ON enrolled_ap.session_id=s.id AND enrolled_ap.check_in_enabled=1 WHERE s.archived_at IS NULL AND s.status!='DONE' AND p.active=1 AND (SELECT COUNT(*) FROM session_check_ins ci WHERE ci.session_id=s.id AND ci.created_at>=?)<enrolled_ap.daily_limit ORDER BY s.created_at LIMIT 2000`).bind(new Date(time-86400000).toISOString()).all();
   let delivered=0,suppressed=0;
   for(const row of rows.results){if(!lifecycleView(row,time).canCheckIn){suppressed++;continue;}
     try {await sendCheckIn(db,row,helpers,time,true);delivered++;} catch(error){if(error.status===409)suppressed++;else throw error;}

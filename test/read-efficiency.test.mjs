@@ -1,0 +1,162 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import worker from '../src/worker.mjs';
+import {SqliteD1} from './d1-sqlite.mjs';
+
+const OWNER='synthetic-owner-for-read-efficiency-test-1234567890';
+
+function fixture(t){
+  const DB=new SqliteD1();
+  t.after(()=>DB.close());
+  const env={DB,OWNER_TOKEN:OWNER};
+  return {DB,env,async call(token,path,body,method=body===undefined?'GET':'POST'){
+    const headers={};if(token)headers.authorization='Bearer '+token;if(body!==undefined)headers['content-type']='application/json';
+    const response=await worker.fetch(new Request('https://hub.test'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),env);
+    return {status:response.status,body:await response.json(),headers:response.headers};
+  }};
+}
+
+async function invite(f,name,projects){
+  const result=await f.call(OWNER,'/api/principals',{name,account:name+'@example.test',projects});
+  assert.equal(result.status,201);return result.body;
+}
+
+async function register(f,token,project,status,machine){
+  const result=await f.call(token,'/api/sessions',{externalId:crypto.randomUUID(),machine,label:machine,project,task:'Synthetic read-path fixture',status});
+  assert.equal(result.status,201);return result.body.session;
+}
+
+test('D1 query plans use indexes for ownership, recipient delivery, check-in and opt-in reads',t=>{
+  const {DB}=fixture(t),db=DB.database;
+  db.prepare("INSERT INTO principals(id,name,account,role,token_hash,projects_json,created_at) VALUES ('reader','Reader','reader@example.test','agent','reader-hash','[\"alpha\"]','2026-10-04T00:00:00.000Z')").run();
+  db.prepare("INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at) VALUES ('reader-session','reader','thread-1','machine','Reader','alpha','query plan','RUNNING',NULL,'{}','2026-10-04T00:00:00.000Z','2026-10-04T00:00:00.000Z')").run();
+  for(let i=0;i<240;i++){
+    db.prepare('INSERT INTO ownership(project,resource_key,owner_session_id,claimed_at) VALUES (?,?,?,?)').run('alpha','resource-'+i,'reader-session','2026-10-04T00:00:00.000Z');
+    db.prepare('INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,created_at,review_state,delivery_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run('owner','reader',null,'reader-session','alpha','NOTE','synthetic','message-'+i,'hash-'+i,'2026-10-04T00:00:00.000Z','APPROVED',i+1);
+    db.prepare('INSERT INTO session_check_ins(session_id,revision,message_id,created_at) VALUES (?,?,NULL,?)').run('reader-session',i,'2026-10-03T12:00:00.000Z');
+    const id='session-'+i;
+    db.prepare("INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at) VALUES (?,?,?,'machine','Reader','alpha','query plan','RUNNING',NULL,'{}','2026-10-04T00:00:00.000Z','2026-10-04T00:00:00.000Z')").run(id,'reader','query-plan-thread-'+i);
+    db.prepare('INSERT INTO accountability_policies(session_id,check_in_enabled,grace_seconds,daily_limit,escalation_seconds,updated_at) VALUES (?, ?,300,1,900,?)').run(id,i===0?1:0,'2026-10-04T00:00:00.000Z');
+  }
+  db.exec('ANALYZE');
+  const plan=(sql,...params)=>db.prepare('EXPLAIN QUERY PLAN '+sql).all(...params).map(row=>row.detail);
+  const expectIndexed=(label,sql,params,table,terms)=>{
+    const details=plan(sql,...params);
+    assert.ok(details.some(detail=>detail.includes(table)&&/\bSEARCH\b/u.test(detail)&&/\bUSING (?:COVERING )?INDEX\b/u.test(detail)),`${label} should use an index; plan: ${details.join(' | ')}`);
+    for(const term of terms)assert.ok(details.some(detail=>detail.includes(term)),`${label} should seek on ${term}; plan: ${details.join(' | ')}`);
+    assert.ok(!details.some(detail=>new RegExp(`SCAN ${table}(?:\\s|$)`,'u').test(detail)),`${label} must not scan ${table}; plan: ${details.join(' | ')}`);
+  };
+  expectIndexed('ownership owner-session lookup','SELECT 1 FROM ownership WHERE owner_session_id=? LIMIT 1',['reader-session'],'ownership',['owner_session_id=?']);
+  expectIndexed('recipient delivery cursor','SELECT id FROM messages WHERE to_principal_id=? AND delivery_id>? ORDER BY delivery_id LIMIT 101',['reader',0],'messages',['to_principal_id=?','delivery_id>?']);
+  expectIndexed('per-session daily check-in count','SELECT COUNT(*) FROM session_check_ins WHERE session_id=? AND created_at>=?',['reader-session','2026-10-03T00:00:00.000Z'],'session_check_ins',['session_id=?','created_at>?']);
+  expectIndexed('enabled accountability-policy enumeration','SELECT session_id FROM accountability_policies WHERE check_in_enabled=1',[],'accountability_policies',['check_in_enabled=?']);
+});
+
+test('complete session views reuse their scan; status and stale filters retain the authorized baseline',async t=>{
+  const f=fixture(t),alpha=await invite(f,'alpha-reader',['alpha']),other=await invite(f,'beta-reader',['alpha','beta']);
+  await register(f,alpha.token,'alpha','RUNNING','alpha-live');
+  const staleWaiting=await register(f,other.token,'alpha','WAITING_ON_USER','alpha-stale');
+  await register(f,other.token,'beta','BLOCKED','beta-private');
+  f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run('2020-01-01T00:00:00.000Z',staleWaiting.id);
+
+  const original=f.DB.prepare.bind(f.DB),sessionScans=[];
+  f.DB.prepare=sql=>{if(/SELECT s\.\*,p\.name AS principal_name/u.test(sql))sessionScans.push(sql);return original(sql);};
+  const complete=await f.call(alpha.token,'/api/sessions?view=full');
+  assert.equal(complete.status,200);
+  assert.equal(complete.body.sessions.length,2);
+  assert.deepEqual(new Set(complete.body.sessions.map(row=>row.project)),new Set(['alpha']));
+  assert.equal(complete.body.accountability.total,2);
+  assert.equal(sessionScans.length,1,'a complete unfiltered (<2000) view reuses its lifecycle rows');
+
+  sessionScans.length=0;
+  const byStatus=await f.call(alpha.token,'/api/sessions?view=full&status=RUNNING');
+  assert.deepEqual(byStatus.body.sessions.map(row=>row.status),['RUNNING']);
+  assert.equal(byStatus.body.summary.RUNNING,1);
+  assert.equal(byStatus.body.summary.WAITING_ON_USER,1,'status filtering must not narrow the summary baseline');
+  assert.equal(byStatus.body.summary.stale,1);
+  assert.equal(byStatus.body.accountability.total,2,'status filtering must not narrow accountability');
+  assert.equal(sessionScans.length,2,'filtered views keep an independent authorized baseline scan');
+
+  sessionScans.length=0;
+  const stale=await f.call(alpha.token,'/api/sessions?view=full&staleOnly=1');
+  assert.deepEqual(stale.body.sessions.map(row=>row.id),[staleWaiting.id]);
+  assert.equal(stale.body.summary.RUNNING,1);
+  assert.equal(stale.body.summary.WAITING_ON_USER,1);
+  assert.equal(stale.body.accountability.total,2);
+  assert.equal(sessionScans.length,2);
+  assert.equal((await f.call(alpha.token,'/api/sessions?project=beta')).status,403,'an unauthorized project cannot enter the baseline');
+});
+
+test('the 2000-session cap keeps a separate complete accountability baseline',async t=>{
+  const f=fixture(t),db=f.DB.database;
+  db.exec('BEGIN');
+  try{
+    const insert=db.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+    for(let i=0;i<2000;i++){
+      insert.run('cap-session-'+i,'owner','cap-thread-'+i,'cap-machine','Capped session','cap-project','Synthetic cap fixture',i===1999?'BLOCKED':'RUNNING',null,'{}','2026-10-04T00:00:00.000Z','2026-10-04T00:00:00.000Z');
+    }
+    db.exec('COMMIT');
+  }catch(error){db.exec('ROLLBACK');throw error;}
+
+  const original=f.DB.prepare.bind(f.DB),sessionScans=[];
+  f.DB.prepare=sql=>{if(/SELECT s\.\*,p\.name AS principal_name/u.test(sql))sessionScans.push(sql);return original(sql);};
+  const response=await f.call(OWNER,'/api/sessions?view=full&project=cap-project');
+  assert.equal(response.status,200);
+  assert.equal(response.body.sessions.length,200,'the response page remains bounded');
+  assert.equal(response.body.total,2000);
+  assert.equal(response.body.summary.RUNNING,1999);
+  assert.equal(response.body.summary.BLOCKED,1);
+  assert.equal(response.body.accountability.total,2000,'the full capped population remains in accountability counts');
+  assert.equal(response.body.accountability.categories.RECONCILE,2000);
+  assert.equal(sessionScans.length,2,'exactly 2000 is capped, so the accountability baseline is read separately');
+});
+
+test('authenticated D1 row-read quota errors are retryable and unexpected storage errors stay masked',async t=>{
+  const f=fixture(t),agent=await invite(f,'quota-reader',['alpha']);
+  const raw="Your account has exceeded D1's free tier daily row read limit; SELECT * FROM messages; token=synthetic-secret-must-not-leak";
+  const installFailure=error=>{
+    const original=f.DB.prepare.bind(f.DB),order=[];
+    f.DB.prepare=sql=>{
+      if(sql.includes('FROM principals WHERE token_hash='))order.push('authenticated principal lookup');
+      if(sql.includes('SELECT s.*,p.name AS principal_name')){
+        order.push('session read');
+        return {bind(){return {all:async()=>{throw error;}};}};
+      }
+      return original(sql);
+    };
+    return order;
+  };
+
+  const quotaOrder=installFailure(new Error('storage read failed',{cause:new Error(raw)}));
+  const start=Date.now(),quota=await f.call(agent.token,'/api/sessions');
+  assert.deepEqual(quotaOrder,['authenticated principal lookup','session read']);
+  assert.equal(quota.status,503);
+  assert.equal(quota.body.error.code,'STORAGE_READ_QUOTA_EXCEEDED');
+  assert.match(quota.body.error.message,/resets at 00:00 UTC/u);
+  assert.ok(!JSON.stringify(quota.body).includes(raw));
+  assert.ok(!JSON.stringify(quota.body).includes(agent.token));
+  assert.ok(!JSON.stringify(quota.body).includes('SELECT *'));
+  const retry=Number(quota.headers.get('retry-after'));
+  const midnight=Math.floor(start/86400000)*86400000+86400000;
+  assert.ok(Number.isInteger(retry)&&retry>=1&&retry<=86400);
+  assert.ok(Math.abs(retry-Math.ceil((midnight-Date.now())/1000))<=2,'Retry-After should point to the next UTC midnight');
+
+  const generic=fixture(t);
+  const other=await invite(generic,'generic-reader',['alpha']);
+  const genericOrder=(()=>{
+    const original=generic.DB.prepare.bind(generic.DB),order=[];
+    generic.DB.prepare=sql=>{
+      if(sql.includes('FROM principals WHERE token_hash='))order.push('authenticated principal lookup');
+      if(sql.includes('SELECT s.*,p.name AS principal_name'))return {bind(){return {all:async()=>{order.push('session read');throw new Error('synthetic driver failure; SELECT secret_column');}};}};
+      return original(sql);
+    };return order;
+  })();
+  const failure=await generic.call(other.token,'/api/sessions');
+  assert.deepEqual(genericOrder,['authenticated principal lookup','session read']);
+  assert.equal(failure.status,500);
+  assert.equal(failure.body.error.code,'INTERNAL_ERROR');
+  assert.ok(!JSON.stringify(failure.body).includes('synthetic driver failure'));
+  assert.ok(!JSON.stringify(failure.body).includes('secret_column'));
+  assert.equal(failure.headers.get('retry-after'),null);
+});

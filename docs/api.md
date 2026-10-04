@@ -45,6 +45,13 @@ Session responses add project-scoped `workContext` and `reportedMachine`. Enviro
 
 ## Compact agent reads
 
+When the storage provider rejects a query because its free daily read allowance
+is exhausted, the API returns HTTP 503, error code `STORAGE_READ_QUOTA_EXCEEDED`,
+and `Retry-After` seconds until the next 00:00 UTC allowance reset. The response
+does not expose SQL, credentials, database identifiers or raw provider errors.
+Clients should preserve their session IDs and inbox cursors and avoid polling
+until capacity is restored. Other unexpected failures retain `INTERNAL_ERROR`.
+
 GET `/api/sessions` and `/api/messages` accept `view=compact|full` and a positive integer `limit` (maximum 200/100 respectively). Existing HTTP/dashboard defaults remain full, with limits 200/100. Compact defaults to 20 and preserves all existing filters and authorization; invalid views/limits return 422. MCP/CLI select compact automatically.
 
 Compact sessions return `{sessions,limit,total,hasMore}`. Each session retains id, label, project, task, status, machine, environment, workContext, latestAttribution, stale, and reduced lifecycle (revision, attention, reason, coverage, overdue, heldClaims, nextAction/wait/nextCheckAt/pauseReason when present). Facets, aggregate counts, private identity labels and full evidence are omitted. `total` counts all matching active sessions before the limit; `hasMore` means refine the search or increase limit. Session discovery has no stable page cursor. Full retains dashboard metadata.

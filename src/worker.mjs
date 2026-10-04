@@ -182,7 +182,11 @@ async function api(request,env){
     const branches=[...new Map(options.results.map(row=>{const value=row.repository&&row.branch?{repository:row.repository,branch:row.branch}:null;return [JSON.stringify(value),value];})).values()];
     const summaryRows=await db.prepare("SELECT s.status,COUNT(*) AS total,SUM(CASE WHEN (julianday(?) - julianday(s.last_seen_at))*86400 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3 THEN 1 ELSE 0 END) AS stale"+SESSION_FROM+filteredScope+' GROUP BY s.status').bind(now(),...filterValues).all();
     const summary={RUNNING:0,WAITING_ON_USER:0,WAITING_ON_AGENT:0,BLOCKED:0,DONE:0,stale:0};for(const row of summaryRows.results){summary[row.status]=row.total;if(row.status!=='DONE')summary.stale+=row.stale;}
-    const all=await db.prepare(SESSION_SELECT+filteredScope+' LIMIT 2000').bind(...filterValues).all();
+    // A complete unfiltered-status page already has every accountability row.
+    // Keep the independent scan for narrowed or capped pages so their summary
+    // still covers the original filter scope, rather than only displayed rows.
+    const all=status===null&&staleOnly===null&&rows.results.length<2000
+      ? rows : await db.prepare(SESSION_SELECT+filteredScope+' LIMIT 2000').bind(...filterValues).all();
     const accountability={categories:Object.fromEntries(ATTENTION.map(key=>[key,0])),unaccounted:0,oldestUnaccountedAt:null,checkpointCoverage:0,observerCoverage:0,total:all.results.length,unaccountedClaims:0};
     for(const row of all.results){const value=lifecycleView(row);accountability.categories[value.attention]++;if(value.checkpoint)accountability.checkpointCoverage++;if(value.coverage==='available')accountability.observerCoverage++;if(value.unaccounted){accountability.unaccounted++;accountability.unaccountedClaims+=value.heldClaims;if(!accountability.oldestUnaccountedAt||value.unaccountedSince<accountability.oldestUnaccountedAt)accountability.oldestUnaccountedAt=value.unaccountedSince;}}
     return json({sessions:ordered.slice(0,limit),limit,total,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
@@ -331,6 +335,13 @@ export default {
       return await env.ASSETS.fetch(request);
     }catch(error){
       if(error instanceof HttpError)return json({error:{code:error.code,message:error.message}},error.status);
+      for(let current=error,depth=0;current&&depth<3;current=current.cause,depth++){
+        if(typeof current.message==='string'&&current.message.includes("Your account has exceeded D1's free tier daily row read limit")){
+          const response=json({error:{code:'STORAGE_READ_QUOTA_EXCEEDED',message:'The Hub storage daily read allowance is exhausted. The owner can review account capacity; the free allowance resets at 00:00 UTC.'}},503);
+          response.headers.set('Retry-After',String(Math.max(1,Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000))));
+          return response;
+        }
+      }
       return json({error:{code:'INTERNAL_ERROR',message:'The coordination request failed. No external operation was started.'}},500);
     }
   },
