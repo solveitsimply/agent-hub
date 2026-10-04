@@ -46,6 +46,8 @@ assert.equal(contextFiltered.body.summary.WAITING_ON_AGENT,1);
 assert.equal((await call(b.body.token,'/api/sessions/'+x.id,{workContext:null},'PATCH')).status,403);
 const redacted=(await call(a.body.token,'/api/sessions')).body.sessions.find(s=>s.id===x.id);assert.deepEqual(redacted.workContext,workContext);
 const checkpoint=await call(a.body.token,`/api/sessions/${x.id}/checkpoint`,{expectedRevision:redacted.lifecycle.revision,checkpoint:{outcome:'Complete synthetic coordination fixture',acceptanceCriteria:'Native D1 custody and observation checks pass',nextCheckAt:new Date(Date.now()-600000).toISOString(),wait:{kind:'external',reason:'Synthetic expected event'}}},'PUT');assert.equal(checkpoint.status,200);
+assert.equal((await call(b.body.token,`/api/sessions/${x.id}/checkpoint`)).status,200);
+assert.equal((await call(b.body.token,`/api/sessions/${x.id}/checkpoint`,{expectedRevision:checkpoint.body.session.lifecycle.revision,checkpoint:{outcome:'Foreign write'}},'PUT')).status,403);
 const observer=await call(owner,'/api/observers',{name:'Native fixture observer',sessions:[{sessionId:x.id,nativeId:'synthetic-native-'+x.id}]});assert.equal(observer.status,201);
 assert.equal((await call(observer.body.token,'/api/messages')).status,403);
 assert.equal((await call(observer.body.token,'/api/observer/observations',{sessionId:x.id,nativeId:'synthetic-native-'+x.id,sequence:0,state:'active',observedAt:new Date().toISOString()})).status,200);

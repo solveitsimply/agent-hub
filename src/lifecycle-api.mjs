@@ -5,7 +5,7 @@ export async function lifecycleApi(ctx) {
   const helpers={fail,string,checkKeys,digest};
   const match=path.match(/^\/api\/sessions\/([^/]+)\/(checkpoint|closeout|accountability-policy|check-in)$/);
   if(match){
-    const operation=match[2],own=['checkpoint','closeout'].includes(operation);
+    const operation=match[2],own=method!=='GET'&&['checkpoint','closeout'].includes(operation);
     const row=await sessionById(db,match[1],principal,own);
     if(method==='GET')return json({lifecycle:lifecycleView(row)});
     if(!['POST','PUT'].includes(method))return null;

@@ -37,6 +37,15 @@ test('registration may capture the first checkpoint without overwriting it on re
  const second=await f.call(f.actor.token,'/sessions',{...body,checkpoint:cp({outcome:'Should not overwrite'})});assert.equal(second.status,200);assert.equal(second.body.session.id,first.body.session.id);assert.equal(second.body.session.lifecycle.checkpoint.outcome,body.checkpoint.outcome);
 });
 
+test('enrolled peers may read lifecycle evidence while only its executor can write it',async t=>{
+ const f=await setup(t);await checkpoint(f);
+ const peer=(await f.call(OWNER,'/principals',{name:'Same-project peer',account:'peer@example.test',projects:['demo']})).body;
+ assert.equal((await f.call(peer.token,`/sessions/${f.s.id}/checkpoint`)).status,200);
+ assert.equal((await f.call(OWNER,`/sessions/${f.s.id}/checkpoint`)).status,200);
+ assert.equal((await f.call(f.other.token,`/sessions/${f.s.id}/checkpoint`)).status,403);
+ assert.equal((await f.call(peer.token,`/sessions/${f.s.id}/checkpoint`,{expectedRevision:1,checkpoint:cp()},'PUT')).status,403);
+});
+
 test('observer is exact-scope, read-only, time bounded and sequence ordered',async t=>{
  const f=await setup(t),o=await observer(f);await checkpoint(f);
  assert.equal((await f.call(f.actor.token,'/observers',{name:'Forged observer',sessions:[]})).status,403);
