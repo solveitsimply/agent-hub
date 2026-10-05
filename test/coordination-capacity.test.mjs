@@ -38,10 +38,10 @@ test('daily fairness is per chat with explicit principal/workspace limits and sa
 });
 
 test('migration backfills retained pending history without reinstating the tiny principal cap',async t=>{
-  const f=fixture(t,{throughMigration:'0008'}),a=await actor(f),b=await actor(f,'peer'),x=await session(f,a),y=await session(f,b);
+  const f=fixture(t,{throughMigration:'0009'}),a=await actor(f),b=await actor(f,'peer'),x=await session(f,a),y=await session(f,b);
   for(let i=0;i<1100;i++)seed(f,a,x,b,y,'old-'+i,'2026-01-01T00:00:00.000Z');
   const before=f.DB.database.prepare('SELECT id,payload_hash,created_at FROM messages ORDER BY id').all();
-  f.DB.database.exec(readFileSync(new URL('../migrations/0009_coordination_capacity.sql',import.meta.url),'utf8'));
+  f.DB.database.exec(readFileSync(new URL('../migrations/0010_coordination_capacity.sql',import.meta.url),'utf8'));
   assert.deepEqual(f.DB.database.prepare('SELECT id,payload_hash,created_at FROM messages ORDER BY id').all(),before);
   assert.equal((await f.call(a.token,'/api/messages',payload(x,y))).status,201);
   const limits=await f.call(a.token,'/api/limits?sessionId='+x.id);assert.equal(limits.body.usage.retainedMessages,1101);assert.equal(limits.body.usage.principal,1);
@@ -168,4 +168,23 @@ test('simultaneous bare and namespaced registrations cannot admit a second chat 
   const request={externalId:'codex:'+external,machine:'fixture',label:'Synthetic',project:'sample',status:'RUNNING',task:'Synthetic'};
   const result=await f.call(a.token,'/api/sessions',request);assert.equal(result.status,200);assert.equal(result.body.session.id,admitted.id);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM sessions').get().n,1);
   const retry=await f.call(a.token,'/api/sessions',request);assert.equal(retry.body.session.id,admitted.id);assert.equal(retry.body.session.externalId,request.externalId);
+});
+
+
+test('a merge winning after lookup cannot silently discard an update or heartbeat',async t=>{
+  for(const operation of ['update','heartbeat']){
+    const f=fixture(t),a=await actor(f),external=crypto.randomUUID(),source=await session(f,a,external),target=legacyDuplicate(f,a,'codex:'+external),prepare=f.DB.prepare.bind(f.DB);let intercepted=false;
+    f.DB.prepare=sql=>{const statement=prepare(sql),run=statement.run;statement.run=async()=>{
+      if(!intercepted&&sql.startsWith(operation==='update'?'UPDATE sessions SET status=':'UPDATE sessions SET last_seen_at=')){
+        intercepted=true;
+        f.DB.database.prepare('INSERT INTO session_aliases VALUES (?,?,?,?,?,?)').run(source.id,target.id,new Date().toISOString(),a.principal.id,'{}','{}');
+        f.DB.database.prepare('UPDATE sessions SET archived_at=? WHERE id=?').run(new Date().toISOString(),source.id);
+      }return run();
+    };return statement;};
+    const path='/api/sessions/'+source.id+(operation==='heartbeat'?'/heartbeat':'');
+    const body=operation==='update'?{task:'Expected applied update'}:{};
+    const result=await f.call(a.token,path,body,operation==='update'?'PATCH':'POST');assert.ok(intercepted);assert.equal(result.status,409);assert.equal(result.body.error.code,'SESSION_CHANGED');
+    const retry=await f.call(a.token,path,body,operation==='update'?'PATCH':'POST');assert.equal(retry.status,200);assert.equal(retry.body.session.id,target.id);
+    if(operation==='update')assert.equal(retry.body.session.task,body.task);
+  }
 });

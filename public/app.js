@@ -47,6 +47,7 @@
     hasMoreMessages: false,
     messageBefore: null,
     replyTo: null,
+    ownerRelay: false,
     refreshing: false,
     refreshRequested: false,
     generation: 0,
@@ -73,6 +74,7 @@
     reviewFilter: $('message-review-filter'), reviewFilterWrap: $('review-filter-wrap'),
     loadOlder: $('load-older-button'), messageForm: $('message-form'),
     fromSessionWrap: $('from-session-wrap'), fromSession: $('from-session'), messageKind: $('message-kind'),
+    ownerRelayFields: $('owner-relay-fields'), ownerRelaySource: $('owner-relay-source'), ownerRelayConfirmed: $('owner-relay-confirmed'), composeTitle: $('compose-title'), messageBodyLabel: $('message-body-label'),
     messageBody: $('message-body'), sendMessage: $('send-message'), composeAs: $('compose-as'), replyContext: $('reply-context'),
     ownerTools: $('owner-tools'), inviteForm: $('invite-form'), inviteMessage: $('invite-message'), principalList: $('principal-list'),
     connectionHistory: $('connection-history'), connectionList: $('connection-list'), connectionStatus: $('connection-history-status'), refreshConnections: $('refresh-connections'), olderConnections: $('older-connections'),
@@ -91,7 +93,9 @@
   const clear = (target) => target.replaceChildren();
   const isOwner = () => state.principal?.role === 'owner';
   const isObserver = () => state.principal?.profile === 'observer';
-  const conversationView = () => isOwner() || isObserver();
+  const isCoordinator = () => state.principal?.profile === 'coordinator';
+  const projectConversationView = () => isObserver() || isCoordinator();
+  const conversationView = () => isOwner() || projectConversationView();
   const selectedSession = () => state.sessions.find((session) => session.id === state.selectedSessionId) ?? (state.selectedSessionSnapshot?.id === state.selectedSessionId ? state.selectedSessionSnapshot : null);
   const visibleProject = () => el.projectFilter.value;
   const projectList = () => [...new Set([
@@ -564,7 +568,7 @@
     clear(el.claims);
     const session = selectedSession();
     if (!session) return;
-    const canManage = ownsSession(session) && !isObserver();
+    const canManage = ownsSession(session) && !isObserver() && !isCoordinator();
     el.claimForm.hidden = !canManage;
     const projectClaims = state.ownership.filter((claim) => claim.project === session.project);
     if (!projectClaims.length) el.claims.append(node('p', 'muted small', 'No resources are claimed in this project.'));
@@ -593,18 +597,22 @@
     return isOwner() && message.kind === 'QUESTION' && message.toSessionId == null && Boolean(message.fromSessionId);
   }
 
+  function canRelayOwnerAnswer(message) {
+    return isCoordinator() && message?.kind === 'QUESTION' && message.toPrincipalId === 'owner' && message.toSessionId == null && message.reviewState !== 'REJECTED' && Boolean(message.fromSessionId);
+  }
+
   function renderMessages() {
     clear(el.messageList);
     const messages = [...state.messages].sort((a, b) => (conversationView() ? b.id - a.id : b.deliveryCursor - a.deliveryCursor));
     const session = selectedSession();
-    el.drawerTitle.textContent = session ? session.label || session.id : state.messageMode === 'owner' ? 'Owner inbox' : isObserver() ? 'Project conversations' : 'Workspace messages';
+    el.drawerTitle.textContent = session ? session.label || session.id : state.messageMode === 'owner' ? 'Owner inbox' : projectConversationView() ? 'Project conversations' : 'Workspace messages';
     el.drawerEyebrow.textContent = session ? 'Session conversation' : state.messageMode === 'owner' ? 'Questions for the human owner' : 'Across sessions';
     el.detailsWrap.hidden = !session;
     el.compose.hidden = !session || isObserver() || !el.messageForm.hidden;
     el.messageSearch.placeholder = session ? 'Search this session’s messages' : state.messageMode === 'owner' ? 'Search owner questions' : 'Search workspace messages';
     el.messageScope.textContent = session
-      ? `${session.project} · ${session.principalName || session.account} · ${isObserver() ? 'Read-only conversation' : isOwner() ? 'Messages sent and received by this session' : 'Messages involving your account and this session'}`
-      : state.messageMode === 'owner' ? 'Questions addressed to the human owner. Only the owner can answer or acknowledge; project observers can read.' : isObserver() ? 'Enrolled projects · all conversations, including owner questions · read-only' : isOwner() ? 'All sessions' : 'All sessions · messages sent or received by this account';
+      ? `${session.project} · ${session.principalName || session.account} · ${isObserver() ? 'Read-only conversation' : isOwner() || isCoordinator() ? 'Messages sent and received by this session' : 'Messages involving your account and this session'}`
+      : state.messageMode === 'owner' ? 'Questions addressed to the human owner. The owner can answer and acknowledge. Coordinators can relay an answer the owner provided; project observers can read.' : isObserver() ? 'Enrolled projects · all conversations, including owner questions · read-only' : isCoordinator() ? 'Enrolled projects · all conversations, including owner questions · sending as your own coordinator session' : isOwner() ? 'All sessions' : 'All sessions · messages sent or received by this account';
     el.messageCount.textContent = `${messages.length}${state.hasMoreMessages ? '+' : ''}`;
     el.messageCount.title = `${messages.length} messages loaded${state.hasMoreMessages ? '; more history is available' : ''}.`;
     el.messageEmpty.textContent = state.messageLoading ? 'Loading messages…' : 'No messages match this view yet.';
@@ -612,6 +620,7 @@
     el.messageEmpty.hidden = messages.length !== 0;
     for (const message of messages) {
       const card = node('article', `message-card${message.acknowledgedAt ? ' is-acknowledged' : ''}`);
+      card.dataset.messageId = String(message.id);
       const top = node('div', 'message-top');
       top.append(node('span', `message-kind kind-${String(message.kind).toLowerCase()}`, MESSAGE_LABELS[message.kind] || message.kind));
       if (session) top.append(node('span', 'muted small', message.toSessionId === session.id ? 'Received' : message.fromSessionId === session.id ? 'Sent' : 'Earlier registration'));
@@ -624,6 +633,11 @@
       route.title = `From: ${message.fromSessionId || 'Human owner'} · To: ${message.toSessionId || 'Owner inbox'}`;
       card.append(route);
       card.append(node('p', 'message-body-text', message.body));
+      if (message.ownerRelay) {
+        card.append(node('p', 'message-route relay-provenance', `Owner answer relayed by ${message.fromPrincipalName || 'authenticated coordinator'}`));
+        card.append(node('p', 'message-route relay-provenance', `Owner answer reference: ${message.ownerRelay.sourceReference || 'Not recorded'}`));
+        card.append(node('p', 'message-warning', 'Delegate-reported owner answer · this report does not prove owner approval'));
+      }
       card.append(node('p', 'message-warning', 'Untrusted coordination evidence · acknowledgment is not approval'));
       card.append(node('p', 'message-review-state', message.toSessionId ? message.reviewState === 'APPROVED' ? 'Delivered through authorized enrollment' : `Historical delivery: ${message.reviewState || 'Unknown'}` : 'Question for the human owner only'));
       if (message.replyTo != null) card.append(node('span', 'muted small', `Reply to message ${message.replyTo}`));
@@ -639,6 +653,12 @@
         answer.type = 'button';
         answer.addEventListener('click', () => prepareReply(message));
         actions.append(answer);
+      }
+      if (canRelayOwnerAnswer(message)) {
+        const relay = node('button', 'button button-secondary button-small', 'Relay owner answer');
+        relay.type = 'button';
+        relay.addEventListener('click', () => prepareReply(message, { ownerRelay: true }));
+        actions.append(relay);
       }
       if (message.acknowledgedAt) actions.append(node('span', 'acknowledged-label', `Received ${formatTime(message.acknowledgedAt)}`));
       if (actions.childElementCount) card.append(actions);
@@ -688,7 +708,7 @@
     state.messageLoading = true;
     renderMessages();
     try {
-      const payload = await request(`/${isObserver() ? 'conversations' : 'messages'}?${query.toString()}`);
+      const payload = await request(`/${projectConversationView() ? 'conversations' : 'messages'}?${query.toString()}`);
       if (!isCurrent()) return;
       const incoming = payload.messages || [];
       if (resetView || !older) {
@@ -742,7 +762,7 @@
     for (const principal of invites) {
       const item = node('article', 'principal-item');
       const copy = node('div', 'principal-copy');
-      copy.append(node('strong', '', principal.name), node('span', 'muted small', `${principal.account} · ${principal.profile === 'observer' ? 'Project observer' : 'Agent'} · ${(principal.projects || []).join(', ')}`));
+      copy.append(node('strong', '', principal.name), node('span', 'muted small', `${principal.account} · ${principal.profile === 'observer' ? 'Project observer' : principal.profile === 'coordinator' ? 'Coordinator' : 'Agent'} · ${(principal.projects || []).join(', ')}`));
       const revoke = node('button', 'button button-danger button-small', 'Revoke');
       revoke.type = 'button';
       revoke.addEventListener('click', () => revokePrincipal(principal));
@@ -756,13 +776,13 @@
     const projectSummary = isOwner() || projects.includes('*') ? 'All projects' : projects.length ? `Projects: ${projects.join(', ')}` : 'No projects';
     el.summary.textContent = isOwner()
       ? `Workspace owner · ${projectSummary}`
-      : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: ${isObserver() ? 'Project observer' : 'Agent'} · ${projectSummary}`;
+      : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: ${isObserver() ? 'Project observer' : isCoordinator() ? 'Coordinator' : 'Agent'} · ${projectSummary}`;
     el.ownerTools.hidden = !isOwner();
     el.reviewFilterWrap.hidden = !conversationView();
     el.openOwnerInbox.hidden = !conversationView();
     el.askOwner.hidden = isOwner() || isObserver();
-    el.openAllMessages.textContent = isObserver() ? 'Project conversations' : 'Workspace messages';
-    el.inboxAccessNote.textContent = isObserver() ? 'Your project observer invitation includes owner questions. You can read conversations, but cannot send, answer or acknowledge messages.' : isOwner() ? 'Owner inbox contains questions for you. Project observers may read them; replies and receipts belong to you.' : 'Your workspace view includes messages sent or received by this account. Ask the owner sends a question from one of your sessions.';
+    el.openAllMessages.textContent = projectConversationView() ? 'Project conversations' : 'Workspace messages';
+    el.inboxAccessNote.textContent = isObserver() ? 'Your project observer invitation includes owner questions. You can read conversations, but cannot send, answer or acknowledge messages.' : isCoordinator() ? 'You can read project conversations and owner questions, send from your own sessions, and relay answers the owner explicitly supplied. Owner receipts and invitation controls remain with the owner.' : isOwner() ? 'Owner inbox contains questions for you. Project observers and coordinators may read them; your replies and receipts remain attributed to you.' : 'Your workspace view includes messages sent or received by this account. Ask the owner sends a question from one of your sessions.';
     el.connectionHistory.hidden = !isOwner();
     for (const select of [el.agentNameFilter, el.agentModelFilter, el.machineFilter, el.branchFilter, el.environmentFilter]) select.disabled = false;
     renderSelectors();
@@ -772,7 +792,7 @@
     renderMessages();
   }
 
-  async function refresh({ quiet = false } = {}) {
+  async function refresh({ quiet = false, principalVerified = false } = {}) {
     if (!state.token || document.hidden) return;
     if (state.refreshing) {
       state.refreshRequested = true;
@@ -782,6 +802,16 @@
     state.refreshRequested = false;
     const generation = state.generation;
     try {
+      if (!principalVerified) {
+        const me = await request('/me');
+        if (generation !== state.generation) return;
+        if (me.principal.profile !== state.principal.profile || me.principal.role !== state.principal.role) {
+          discardComposer();
+          resetMessageView();
+          if (el.drawer.open && state.messageMode === 'owner' && !['owner', 'observer', 'coordinator'].includes(me.principal.profile)) el.drawer.close();
+        }
+        state.principal = me.principal;
+      }
       const query = sessionQuery();
       const sessionPayload = await request(`/sessions${query}`);
       if (generation !== state.generation) return;
@@ -874,22 +904,30 @@
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation && state.selectedSessionId === sessionId) toast(error.message, 'error'); }
   }
 
-  async function openComposer(session, { ownerQuestion = false, reply = null } = {}) {
-    if (isObserver()) return;
+  async function openComposer(session, { ownerQuestion = false, reply = null, ownerRelay = false } = {}) {
+    if (isObserver() || (ownerRelay && !canRelayOwnerAnswer(reply))) return;
     discardComposer();
     const generation = state.generation, composeId = ++state.composeGeneration;
     state.composeTarget = { sessionId: ownerQuestion ? null : session.id, project: session?.project || '', ownerQuestion };
     state.replyTo = reply;
+    state.ownerRelay = ownerRelay;
+    el.composeTitle.textContent = ownerRelay ? 'Relay owner answer' : reply ? 'Answer question' : ownerQuestion ? 'Ask the owner' : 'Send a message';
+    el.messageBodyLabel.textContent = ownerRelay ? 'Owner’s answer (verbatim)' : 'Message';
+    el.ownerRelayFields.hidden = !ownerRelay;
+    el.ownerRelaySource.required = ownerRelay;
+    el.ownerRelayConfirmed.required = ownerRelay;
+    el.messageBody.placeholder = ownerRelay ? 'Paste the answer the owner provided for this question. Preserve the exact wording.' : 'Share coordination context. Keep secrets and approval packets out of messages.';
+    el.sendButton.textContent = ownerRelay ? 'Send owner answer relay' : 'Send message';
     el.messageForm.hidden = false;
     el.compose.hidden = true;
     el.composeRecipient.textContent = ownerQuestion ? 'To: Human owner inbox · Question from your selected session' : `To: ${session.label || session.id} · ${session.project}`;
-    el.composeAs.textContent = isOwner() ? 'As owner' : `As ${state.principal.name}`;
+    el.composeAs.textContent = isOwner() ? 'As owner' : isCoordinator() ? `As coordinator · ${state.principal.name}` : `As ${state.principal.name}`;
     el.fromSessionWrap.hidden = isOwner();
     el.fromSession.required = !isOwner();
     el.messageKind.value = ownerQuestion ? 'QUESTION' : reply ? 'ANSWER' : 'NOTE';
     el.messageKind.disabled = ownerQuestion || Boolean(reply);
     el.replyContext.hidden = !reply;
-    el.replyContext.textContent = reply ? `Answering question #${reply.id} from ${reply.fromPrincipalName || 'agent'}.` : '';
+    el.replyContext.textContent = reply ? `${ownerRelay ? 'Relaying the owner’s answer for' : 'Answering'} question #${reply.id} from ${reply.fromPrincipalName || 'agent'}.` : '';
     el.sendButton.disabled = state.sending || !isOwner();
     clear(el.fromSession);
     option(el.fromSession, '', 'Loading your sessions…');
@@ -933,13 +971,23 @@
     state.composeTarget.project = sender?.project || '';
   }
 
-  function prepareReply(message) {
+  function prepareReply(message, { ownerRelay = false } = {}) {
+    if (ownerRelay ? !canRelayOwnerAnswer(message) : !canAnswerAsOwner(message)) return;
     const session = state.sessions.find(item => item.id === message.fromSessionId) || { id: message.fromSessionId, label: message.fromPrincipalName + '’s session', project: message.project };
-    openComposer(session, { reply: message });
+    openComposer(session, { reply: message, ownerRelay });
   }
 
   function clearReply() {
     state.replyTo = null;
+    state.ownerRelay = false;
+    el.ownerRelayFields.hidden = true;
+    el.ownerRelaySource.value = '';
+    el.ownerRelaySource.required = false;
+    el.ownerRelayConfirmed.checked = false;
+    el.ownerRelayConfirmed.required = false;
+    el.composeTitle.textContent = 'Send a message';
+    el.messageBodyLabel.textContent = 'Message';
+    el.sendButton.textContent = 'Send message';
     el.replyContext.hidden = true;
     el.replyContext.textContent = '';
     el.messageBody.placeholder = 'Share coordination context. Keep secrets and approval packets out of messages.';
@@ -959,7 +1007,7 @@
   }
 
   async function releaseClaim(session, resourceKey) {
-    if (!ownsSession(session)) return;
+    if (!ownsSession(session) || isObserver() || isCoordinator()) return;
     if (!window.confirm(`Release your claim on “${resourceKey}” for ${session.project}?`)) return;
     const generation = state.generation;
     try {
@@ -1020,7 +1068,7 @@
     if (generation !== state.generation) return;
     state.principal = me.principal;
     showConnection(true);
-    await refresh({ quiet: true });
+    await refresh({ quiet: true, principalVerified: true });
   }
 
   function disconnect() {
@@ -1215,7 +1263,7 @@
     event.preventDefault();
     const session = selectedSession();
     const resourceKey = el.claimResource.value.trim();
-    if (!ownsSession(session) || !resourceKey) return;
+    if (!ownsSession(session) || !resourceKey || isObserver() || isCoordinator()) return;
     const generation = state.generation;
     try {
       await request('/ownership/claim', { method: 'POST', body: JSON.stringify({ sessionId: session.id, resourceKey }) });
@@ -1240,10 +1288,21 @@
     const fromSessionId = isOwner() ? undefined : el.fromSession.value;
     const toSessionId = target.sessionId || undefined;
     const kind = el.messageKind.value;
-    const body = el.messageBody.value.trim();
-    if (!project || !body || (!isOwner() && !state.senderSessions.some(item => item.id === fromSessionId && item.project === project))) {
+    const ownerRelay = state.ownerRelay;
+    const body = ownerRelay ? el.messageBody.value : el.messageBody.value.trim();
+    if (!project || !body.trim() || (!isOwner() && !state.senderSessions.some(item => item.id === fromSessionId && item.project === project))) {
       setText(el.sendMessage, 'Choose your sending session and enter a message.');
       return;
+    }
+    if (ownerRelay) {
+      if (!canRelayOwnerAnswer(state.replyTo) || project !== state.replyTo.project || toSessionId !== state.replyTo.fromSessionId || kind !== 'ANSWER') {
+        setText(el.sendMessage, 'Relay this answer only to the session that asked this owner question. Cancel to compose another message.');
+        return;
+      }
+      if (!el.ownerRelayConfirmed.checked || !el.ownerRelaySource.value.trim()) {
+        setText(el.sendMessage, 'Provide the owner answer reference and confirm the owner supplied this answer for this question.');
+        return;
+      }
     }
     if (!toSessionId && (!target.ownerQuestion || isOwner() || kind !== 'QUESTION')) return;
     const payload = {
@@ -1251,6 +1310,7 @@
       ...(toSessionId ? { toSessionId } : {}),
       project, kind, body,
       ...(state.replyTo ? { replyTo: state.replyTo.id } : {}),
+      ...(ownerRelay ? { ownerRelay: { ownerProvided: true, sourceReference: el.ownerRelaySource.value.trim() } } : {}),
     };
     const fingerprint = JSON.stringify(payload);
     if (state.pendingSend?.fingerprint !== fingerprint) state.pendingSend = { fingerprint, key: crypto.randomUUID() };
@@ -1268,6 +1328,7 @@
       setText(el.sendMessage, toSessionId ? 'Message delivered to the selected recipient.' : 'Question submitted to the human owner inbox.');
       clearReply();
       el.messageKind.disabled = target.ownerQuestion;
+      if (ownerRelay) el.messageKind.value = 'NOTE';
       try { await refreshMessages({ reset: true }); }
       catch (error) { if (!(error instanceof StaleRequestError)) toast(`Message sent. Could not refresh messages: ${error.message}`, 'error'); }
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation && composeId === state.composeGeneration) setText(el.sendMessage, error.message); }

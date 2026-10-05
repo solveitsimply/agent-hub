@@ -1,12 +1,14 @@
 import { sessionMessageScope } from './coordination-capacity.mjs';
 import { messageFilters } from './message-filters.mjs';
+
+import {compactMessage} from './agent-view.mjs';
 // Separate project oversight from recipient delivery and human owner custody.
 export async function accessApi(c) {
   const {path,method,url,db,principal,readBody,fail,checkKeys,string,numeric,
     readOptions,ownerOnly,requireProject,sessionById,requireCurrent,json,
     messageSelect,messageView,activePrincipal,now} = c;
   if(path==='/api/conversations'&&method==='GET') {
-    if(principal.role!=='owner'&&principal.profile!=='observer')
+    if(principal.role!=='owner'&&!['observer','coordinator'].includes(principal.profile))
       fail(403,'OBSERVER_REQUIRED','Project conversation visibility requires an observer invitation.');
     const {view,limit}=readOptions(url,100),project=url.searchParams.get('project');
     let query=messageSelect+' WHERE 1=1',values=[];
@@ -36,7 +38,7 @@ export async function accessApi(c) {
     await requireCurrent(db,principal);
     const hasMore=rows.results.length>limit,page=rows.results.slice(0,limit),ordered=descending?page.reverse():page;
     // The observer cursor uses message IDs, never recipient delivery sequence.
-    return json({messages:ordered.map(row=>messageView(row,principal,true)),nextCursor:ordered.at(-1)?.id??after,
+    return json({messages:ordered.map(row=>{const message=messageView(row,principal,true);return view==='compact'?{...compactMessage(message),toPrincipalId:message.toPrincipalId,reviewState:message.reviewState}:message;}),nextCursor:ordered.at(-1)?.id??after,
       nextBefore:descending&&hasMore?ordered[0]?.id??null:null,limit,hasMore,view});
   }
   if(path==='/api/connections'&&method==='POST') {

@@ -47,6 +47,6 @@ try{
   const limits=await call(owner,'/api/limits?sessionId='+targetId);assert.equal(limits.body.usage.session,500);
   assert.equal((await call(owner,'/api/principals/'+peer.body.principal.id,{name:'Synthetic development account'},'PATCH')).status,200);
   assert.equal((await call(peer.body.token,'/api/me')).body.principal.name,'Synthetic development account');
-  const receipt={observedAt:new Date().toISOString(),runtime:'Cloudflare workerd + local D1',scope:'Synthetic loopback only',checks:['migration 0009 triggers','native per-chat rate limit and Retry-After','quota counters include pending records','merge preserves payload hashes/delivery cursors','old-ID retries at capacity','alias inbox/heartbeat','ownership transfer','cross-principal sender refusal','owner-only display rename']};
+  const receipt={observedAt:new Date().toISOString(),runtime:'Cloudflare workerd + local D1',scope:'Synthetic loopback only',checks:['migration 0010 triggers','native per-chat rate limit and Retry-After','quota counters include pending records','merge preserves payload hashes/delivery cursors','old-ID retries at capacity','alias inbox/heartbeat','ownership transfer','cross-principal sender refusal','owner-only display rename']};
   await mkdir(new URL('../.evidence/',import.meta.url),{recursive:true});await writeFile(new URL('../.evidence/coordination-native.json',import.meta.url),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(receipt));
 }finally{await rm(temporary,{recursive:true,force:true});}

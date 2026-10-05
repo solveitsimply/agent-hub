@@ -124,9 +124,9 @@ build output. Keep screenshots only while review or acceptance needs them.
 
 ## Coordination capacity upgrade
 
-Before migration 0009, export and verify a private backup of the existing D1
+Before migration 0010, export and verify a private backup of the existing D1
 instance. Apply only pending migrations, then deploy the matching verified
-Worker/assets. Migration 0009 backfills daily counters and retained body-byte
+Worker/assets. Migration 0010 backfills daily counters and retained body-byte
 usage for all existing review states, adds an index for reply custody, and
 stores session aliases/snapshots without rewriting messages or cursors. Retain
 the backup through hosted acceptance and the agreed recovery window.

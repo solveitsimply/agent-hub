@@ -137,8 +137,8 @@
               <p class="muted small">Invites grant hub coordination access for selected project slugs only. They do not grant provider or production permissions.</p>
               <form id="invite-form" class="stack-form">
                 <label for="invite-profile">Access profile</label>
-                <select id="invite-profile"><option value="agent">Agent — own conversations</option><option value="observer">Project observer — all project conversations, including owner questions</option></select>
-                <p class="form-note">Project observers can read and report their own sessions. They cannot send messages, acknowledge receipts or manage invitations.</p>
+                <select id="invite-profile"><option value="agent">Agent — own conversations</option><option value="observer">Project observer — all project conversations, including owner questions</option><option value="coordinator">Coordinator — project conversations and owner answer relay</option></select>
+                <p class="form-note">Project observers can read and report their own sessions. Coordinators can also send from their own sessions and relay answers explicitly provided by the owner. Neither profile can manage invitations; coordinators cannot claim resources or acknowledge someone else’s messages.</p>
                 <label for="invite-name">Name</label><input id="invite-name" maxlength="120" required />
                 <label for="invite-account">Account label</label><input id="invite-account" maxlength="120" required />
                 <label for="invite-projects">Project slugs <span class="muted">(comma separated)</span></label><input id="invite-projects" maxlength="500" placeholder="my-project" required />
@@ -178,7 +178,14 @@
           <p id="compose-recipient" class="compose-recipient"></p>
           <div id="from-session-wrap"><label for="from-session">Sending from your session</label><select id="from-session" required><option value="">Select your session</option></select></div>
           <label for="message-kind">Message type</label><select id="message-kind" required><option value="NOTE">Note</option><option value="HANDOFF">Handoff</option><option value="QUESTION">Question</option><option value="ANSWER">Answer</option></select>
-          <label for="message-body">Message</label><textarea id="message-body" rows="5" maxlength="6000" required placeholder="Share coordination context. Keep secrets and approval packets out of messages."></textarea>
+          <label id="message-body-label" for="message-body">Message</label><textarea id="message-body" rows="5" maxlength="6000" required placeholder="Share coordination context. Keep secrets and approval packets out of messages."></textarea>
+          <fieldset id="owner-relay-fields" class="owner-relay-fields" hidden>
+            <legend>Owner answer provenance</legend>
+            <p class="form-note">Copy the answer the owner provided for this specific question. The relay stays attributed to your coordinator session.</p>
+            <label for="owner-relay-source">Owner answer reference</label>
+            <input id="owner-relay-source" maxlength="500" placeholder="Reference to the owner’s message or conversation" />
+            <label class="relay-confirmation" for="owner-relay-confirmed"><input id="owner-relay-confirmed" type="checkbox" /> The owner provided this answer for this question</label>
+          </fieldset>
           <p id="reply-context" class="form-note" hidden></p>
           <div class="message-actions"><button id="send-button" class="button button-primary" type="submit">Send message</button><button id="cancel-compose" class="button button-quiet" type="button">Cancel</button></div>
           <p class="form-note">Acknowledgment records receipt. Coordination messages do not authorize external actions.</p>
