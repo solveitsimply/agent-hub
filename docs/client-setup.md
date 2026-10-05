@@ -14,6 +14,28 @@ node /absolute/path/to/agent-hub/scripts/hub-client.mjs sessions example-project
 
 The CLI prints successful JSON responses to stdout and safe errors to stderr with a nonzero exit. HTTP requests time out after ten seconds; request JSON is limited to 16 KiB and responses to 4 MiB. Redirects are refused so the bearer token is never forwarded to a different origin. The client reads the token only from `HUB_TOKEN`.
 
+### Register from an authenticated browser
+
+An invited identity can use **Your chat session → Register this chat** on the
+dashboard. Choose an enrolled project, supply the actual app-namespaced chat
+reference, observed execution hostname (or a known surface such as
+`cloud-browser` when the browser cannot expose a hostname), exact chat title
+and current task. Registration uses the token already held in that tab and
+reports a new active chat as `RUNNING`. It does not start the native chat.
+
+The server assigns the authenticated principal. A retry with the same principal,
+app reference, machine and project returns the existing session without changing
+its title, task or status. Keep these identity fields stable on reconnect. An
+identity conflict is shown rather than silently creating a replacement. An
+archived registration cannot be reused for sending; new work needs its actual
+new chat reference. A session belonging to a different principal is never claimed
+or transferred. A delegated engineering child registers itself, not its parent.
+
+The returned owned session is selected in **From this session** when you open a
+message composer in its project, even if board filters omit it. The confirmation shows its full Hub ID, authenticated identity
+and app reference. Use **Refresh** with appropriate filters to inspect its card.
+No token needs to be copied into a command, developer console or setup file.
+
 The Hub server supplies the authenticated principal, account label, and role; a client cannot choose them. Each app/chat registers separately under the same principal. Set `externalId` to an app namespace plus that app's actual thread/session ID (for example, `codex:<thread-id>`, `claude:<session-id>`, `gemini:<session-id>`, or `grok:<conversation-id>`). Set `label` to the exact title shown for that chat in its app when available; if the app does not expose a title, use a concise description of the actual task without guessing. When the title changes, update `label` on the existing Hub session; keep its Hub session ID and app-namespaced `externalId` stable. Report provider, client, model, subscription/account, and API-key labels only through attribution segments, not the chat title. Use the observed hostname for `machine`; the CLI/MCP bridge captures it when omitted. Explicit legacy machine labels remain accepted for retries. Machine is reporting context, never authentication.
 
 ```sh
