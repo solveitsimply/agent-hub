@@ -25,7 +25,7 @@ try{
   const target=await call(owner,'/api/sessions',{externalId:'codex:'+external,machine:'native-fixture',label:'Synthetic duplicate',project:'capacity-fixture',task:'Verify preserved custody',status:'DONE'});assert.equal(target.status,201);
   const targetId=target.body.session.id;assert.match(targetId,/^[a-f0-9-]{36}$/);
   // Simulate a duplicate that existed before normalization was deployed.
-  await sql(`INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,created_at,last_seen_at) SELECT '${sourceId}',principal_id,'${external}',machine,label,project,task,'RUNNING',created_at,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM sessions WHERE id='${targetId}';`);
+  await sql(`INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,created_at,last_seen_at) SELECT '${sourceId}',principal_id,'${external}',machine,label,project,task,'RUNNING',created_at,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM sessions WHERE id='${targetId}'; UPDATE sessions SET revision=40 WHERE id='${sourceId}';`);
   const peer=await call(owner,'/api/principals',{name:'Synthetic peer',account:'peer@example.test',projects:['capacity-fixture']});assert.equal(peer.status,201);
   const recipient=await call(peer.body.token,'/api/sessions',{externalId:'codex:'+crypto.randomUUID(),machine:'other-fixture',label:'Synthetic peer',project:'capacity-fixture',task:'Receive fixture',status:'RUNNING'});assert.equal(recipient.status,201);
   const recipientId=recipient.body.session.id;
@@ -37,6 +37,8 @@ try{
   const switchBody={provider:'Synthetic',client:'Synthetic native client',previousSegmentId:null,idempotencyKey:crypto.randomUUID()};
   const recordedSwitch=await call(owner,'/api/sessions/'+sourceId+'/attribution',switchBody);assert.equal(recordedSwitch.status,201);
   const merge=await call(owner,'/api/sessions/'+sourceId+'/merge',{targetSessionId:targetId});assert.equal(merge.status,200);assert.equal(merge.body.session.status,'RUNNING');
+  assert.ok(merge.body.session.lifecycle.revision>40);
+  const stale=await call(owner,'/api/sessions/'+sourceId+'/checkpoint',{expectedRevision:40,checkpoint:{outcome:'Stale fixture',acceptanceCriteria:'Stale acceptance',nextAction:'Stale next action'}});assert.equal(stale.status,409);assert.equal(stale.body.error.code,'SESSION_CHANGED');
   const switchRetry=await call(owner,'/api/sessions/'+sourceId+'/attribution',switchBody);assert.equal(switchRetry.status,201);assert.equal(switchRetry.body.segment.id,recordedSwitch.body.segment.id);assert.equal(switchRetry.body.segment.sessionId,sourceId);
   const retry=await call(owner,'/api/messages',payload);assert.equal(retry.status,201);assert.equal(retry.body.message.payloadHash,sent.body.message.payloadHash);assert.equal(retry.body.message.deliveryCursor,sent.body.message.deliveryCursor);
   assert.equal((await call(owner,'/api/sessions/'+sourceId+'/heartbeat',{})).body.session.id,targetId);
@@ -50,6 +52,6 @@ try{
   const limits=await call(owner,'/api/limits?sessionId='+targetId);assert.equal(limits.body.usage.session,500);
   assert.equal((await call(owner,'/api/principals/'+peer.body.principal.id,{name:'Synthetic development account'},'PATCH')).status,200);
   assert.equal((await call(peer.body.token,'/api/me')).body.principal.name,'Synthetic development account');
-  const receipt={observedAt:new Date().toISOString(),runtime:'Cloudflare workerd + local D1',scope:'Synthetic loopback only',checks:['migration 0010 triggers','native per-chat rate limit and Retry-After','quota counters include pending records','merge preserves payload hashes/delivery cursors','old-ID retries at capacity','old attribution key retry preserves original segment','alias inbox/heartbeat','ownership transfer','cross-principal sender refusal','owner-only display rename']};
+  const receipt={observedAt:new Date().toISOString(),runtime:'Cloudflare workerd + local D1',scope:'Synthetic loopback only',checks:['migration 0010 triggers','merged revision exceeds both lineages; stale checkpoint rejected','native per-chat rate limit and Retry-After','quota counters include pending records','merge preserves payload hashes/delivery cursors','old-ID retries at capacity','old attribution key retry preserves original segment','alias inbox/heartbeat','ownership transfer','cross-principal sender refusal','owner-only display rename']};
   await mkdir(new URL('../.evidence/',import.meta.url),{recursive:true});await writeFile(new URL('../.evidence/coordination-native.json',import.meta.url),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(receipt));
 }finally{await rm(temporary,{recursive:true,force:true});}

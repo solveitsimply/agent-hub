@@ -47,7 +47,7 @@ export async function sessionManagementApi(c){
     db.prepare(`UPDATE ownership SET owner_session_id=? WHERE owner_session_id=? AND ${guard}`).bind(target.id,source.id,...guarded()),
     db.prepare(`INSERT INTO accountability_policies SELECT ?,check_in_enabled,grace_seconds,daily_limit,escalation_seconds,updated_at FROM accountability_policies WHERE session_id=? AND ${guard} ON CONFLICT(session_id) DO NOTHING`).bind(target.id,source.id,...guarded()),
     db.prepare(`UPDATE session_aliases SET canonical_session_id=? WHERE canonical_session_id=? AND ${guard}`).bind(target.id,source.id,...guarded()),
-    db.prepare(`UPDATE sessions SET label=?,task=?,status=?,environment=?,details_json=?,checkpoint_json=?,checkpoint_at=?,closeout_json=?,revision=revision+1,last_seen_at=? WHERE id=? AND ${guard}`).bind(latest.label,latest.task,latest.status,latest.environment,latest.details_json,latest.checkpoint_json,latest.checkpoint_at,latest.closeout_json,latest.last_seen_at,target.id,...guarded()),
+    db.prepare(`UPDATE sessions SET label=?,task=?,status=?,environment=?,details_json=?,checkpoint_json=?,checkpoint_at=?,closeout_json=?,revision=MAX(revision,?)+1,last_seen_at=? WHERE id=? AND ${guard}`).bind(latest.label,latest.task,latest.status,latest.environment,latest.details_json,latest.checkpoint_json,latest.checkpoint_at,latest.closeout_json,source.revision,latest.last_seen_at,target.id,...guarded()),
     db.prepare(`UPDATE sessions SET archived_at=? WHERE id=? AND ${guard}`).bind(date,source.id,...guarded()),
   ]);
   await requireCurrent(db,principal);

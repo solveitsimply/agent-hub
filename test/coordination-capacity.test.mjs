@@ -223,3 +223,20 @@ test('merge rejects different environments and preserves every native binding wi
     assert.equal((await f.call(observer.body.token,'/api/observer/observations',{...observation,sessionId:bound==='source'?target.id:source.id,sequence:1})).body.error.code,'OBSERVATION_CHANGED');
   }
 });
+
+
+test('a delayed pre-merge checkpoint cannot become current again as canonical revisions advance',async t=>{
+  const f=fixture(t),a=await actor(f),external=crypto.randomUUID(),source=await session(f,a,external),target=legacyDuplicate(f,a,'codex:'+external);
+  f.DB.database.prepare('UPDATE sessions SET revision=40 WHERE id=?').run(source.id);
+  const merged=await f.call(a.token,'/api/sessions/'+source.id+'/merge',{targetSessionId:target.id});assert.equal(merged.status,200);
+  let revision=merged.body.session.lifecycle.revision;
+  assert.ok(revision>40,'Merge must advance beyond both registrations');
+  const checkpoint={outcome:'Current task',acceptanceCriteria:'Current acceptance',nextAction:'Current next action'};
+  // Later legitimate writes must never reuse a pre-merge source revision.
+  for(let i=0;i<3;i++){
+    const update=await f.call(a.token,'/api/sessions/'+target.id+'/checkpoint',{expectedRevision:revision,checkpoint});assert.equal(update.status,200);revision=update.body.session.lifecycle.revision;
+  }
+  const delayed=await f.call(a.token,'/api/sessions/'+source.id+'/checkpoint',{expectedRevision:40,checkpoint:{...checkpoint,outcome:'Stale superseded task'}});
+  assert.equal(delayed.status,409);assert.equal(delayed.body.error.code,'SESSION_CHANGED');
+  assert.equal((await f.call(a.token,'/api/sessions/'+target.id+'/checkpoint')).body.lifecycle.checkpoint.outcome,checkpoint.outcome);
+});
