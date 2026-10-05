@@ -109,23 +109,21 @@ test('namespaced registration reuses the existing chat and arbitrary provider ID
   assert.equal((await f.call(a.token,'/api/sessions/'+upper.id+'/merge',{targetSessionId:lower.id})).status,422);
 });
 
-test('merged attribution preserves original intervals and predecessor custody; native callbacks preserve exact identity',async t=>{
+test('merged attribution preserves original intervals and predecessor custody',async t=>{
   const f=fixture(t),a=await actor(f),external=crypto.randomUUID(),source=await session(f,a,external),target=legacyDuplicate(f,a,'codex:'+external);
   const append=async(id,key,previousSegmentId)=>{const r=await f.call(a.token,'/api/sessions/'+id+'/attribution',{provider:'Synthetic',client:'Synthetic',model:key,idempotencyKey:key,previousSegmentId});assert.equal(r.status,201);return r.body.segment;};
   const first=await append(source.id,'one',null),other=await append(target.id,'other',null),last=await append(source.id,'two',first.id);
   for(const [id,date] of [[first.id,'2026-01-01T00:00:00Z'],[other.id,'2026-01-02T00:00:00Z'],[last.id,'2026-01-03T00:00:00Z']])f.DB.database.prepare('UPDATE session_attribution_segments SET started_at=? WHERE id=?').run(date,id);
-  const observer=await f.call(OWNER,'/api/observers',{name:'Synthetic observer',sessions:[{sessionId:source.id,nativeId:'exact-native'}]});assert.equal(observer.status,201);
   assert.equal((await f.call(a.token,'/api/sessions/'+source.id+'/merge',{targetSessionId:target.id})).status,200);
   const segments=(await f.call(a.token,'/api/sessions/'+target.id+'/attribution')).body.segments;
   assert.equal(segments.find(s=>s.id===first.id).endedAt,'2026-01-03T00:00:00Z');assert.equal(segments.find(s=>s.id===other.id).endedAt,null);assert.ok(segments.find(s=>s.id===last.id).endedAt);
   const next=await append(target.id,'three',last.id);assert.equal(next.sessionId,target.id);
-  const observation={sessionId:source.id,nativeId:'exact-native',sequence:0,state:'idle',observedAt:new Date().toISOString()};assert.equal((await f.call(observer.body.token,'/api/observer/observations',observation)).status,200);
-  assert.equal((await f.call(observer.body.token,'/api/observer/observations',{...observation,nativeId:'wrong-native',sequence:1})).status,409);
+
 });
 
 
 test('normalization and merge recheck revocation, scope and custody at the final write',async t=>{
-  for(const operation of ['normalize','merge-revoked','merge-scope','merge-observer','merge-policy']){
+  for(const operation of ['normalize','merge-revoked','merge-scope','merge-observer','merge-environment','merge-policy']){
     const f=fixture(t),a=await actor(f),external=crypto.randomUUID(),source=await session(f,a,external);
     const target=operation==='normalize'?null:legacyDuplicate(f,a,'codex:'+external);
     const prepare=f.DB.prepare.bind(f.DB);let intercepted=false;
@@ -136,8 +134,9 @@ test('normalization and merge recheck revocation, scope and custody at the final
         if(operation==='merge-scope')f.DB.database.prepare('UPDATE principals SET projects_json=? WHERE id=?').run('[]',a.principal.id);
         if(operation==='merge-observer'){
           f.DB.database.exec("INSERT INTO observers VALUES ('fixture-observer','Synthetic','no-credential',1,'2020-01-01','2099-01-01')");
-          for(const id of [source.id,target.id])f.DB.database.prepare('INSERT INTO observer_sessions(session_id,observer_id,native_id) VALUES (?,?,?)').run(id,'fixture-observer',id);
+          for(const id of [source.id])f.DB.database.prepare('INSERT INTO observer_sessions(session_id,observer_id,native_id) VALUES (?,?,?)').run(id,'fixture-observer',id);
         }
+        if(operation==='merge-environment')f.DB.database.prepare('UPDATE sessions SET environment=? WHERE id=?').run('prod',target.id);
         if(operation==='merge-policy')for(const [id,limit] of [[source.id,1],[target.id,2]])f.DB.database.prepare('INSERT INTO accountability_policies(session_id,daily_limit,updated_at) VALUES (?,?,?)').run(id,limit,'2020-01-01');
       }return run();
     };return statement;};
@@ -186,5 +185,41 @@ test('a merge winning after lookup cannot silently discard an update or heartbea
     const result=await f.call(a.token,path,body,operation==='update'?'PATCH':'POST');assert.ok(intercepted);assert.equal(result.status,409);assert.equal(result.body.error.code,'SESSION_CHANGED');
     const retry=await f.call(a.token,path,body,operation==='update'?'PATCH':'POST');assert.equal(retry.status,200);assert.equal(retry.body.session.id,target.id);
     if(operation==='update')assert.equal(retry.body.session.task,body.task);
+  }
+});
+
+
+test('old attribution keys retain original custody while new alias switches use canonical scope',async t=>{
+  const f=fixture(t),a=await actor(f),b=await actor(f,'peer'),external=crypto.randomUUID(),source=await session(f,a,external),target=legacyDuplicate(f,a,'codex:'+external);
+  const oldBody={provider:'Synthetic',client:'Synthetic old client',previousSegmentId:null,idempotencyKey:'cached-switch'},targetBody={...oldBody,client:'Synthetic target client'};
+  const old=await f.call(a.token,'/api/sessions/'+source.id+'/attribution',oldBody),current=await f.call(a.token,'/api/sessions/'+target.id+'/attribution',targetBody);assert.equal(old.status,201);assert.equal(current.status,201);
+  assert.equal((await f.call(a.token,'/api/sessions/'+source.id+'/merge',{targetSessionId:target.id})).status,200);
+  const retry=await f.call(a.token,'/api/sessions/'+source.id+'/attribution',oldBody);assert.equal(retry.status,201);assert.equal(retry.body.segment.id,old.body.segment.id);assert.equal(retry.body.segment.sessionId,source.id);assert.ok(retry.body.segment.endedAt);
+  assert.equal((await f.call(a.token,'/api/sessions/'+target.id+'/attribution',targetBody)).body.segment.id,current.body.segment.id);
+  assert.equal((await f.call(a.token,'/api/sessions/'+source.id+'/attribution',{...oldBody,client:'Changed'})).body.error.code,'IDEMPOTENCY_CONFLICT');
+  const nextBody={provider:'Synthetic',client:'Synthetic next client',previousSegmentId:current.body.segment.id,idempotencyKey:'next-switch'};
+  const next=await f.call(a.token,'/api/sessions/'+source.id+'/attribution',nextBody);assert.equal(next.status,201);assert.equal(next.body.segment.sessionId,target.id);
+  assert.equal((await f.call(a.token,'/api/sessions/'+source.id+'/attribution',nextBody)).body.segment.id,next.body.segment.id);
+  assert.equal((await f.call(b.token,'/api/sessions/'+source.id+'/attribution',oldBody)).status,403);
+  assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM session_attribution_segments').get().n,3);
+});
+
+
+test('merge rejects different environments and preserves every native binding without transfer',async t=>{
+  for(const bound of ['source','target']){
+    const f=fixture(t),a=await actor(f),external=crypto.randomUUID(),source=await session(f,a,external),target=legacyDuplicate(f,a,'codex:'+external);
+    f.DB.database.prepare('UPDATE sessions SET environment=? WHERE id=?').run('prod',target.id);
+    assert.equal((await f.call(a.token,'/api/sessions/'+source.id+'/merge',{targetSessionId:target.id})).body.error.code,'SESSION_ENVIRONMENT_CONFLICT');
+    f.DB.database.prepare('UPDATE sessions SET environment=NULL WHERE id=?').run(target.id);
+    const id=bound==='source'?source.id:target.id;
+    const observer=await f.call(OWNER,'/api/observers',{name:'Synthetic observer',sessions:[{sessionId:id,nativeId:'exact-native'}]});assert.equal(observer.status,201);
+    const before=f.DB.database.prepare('SELECT * FROM observer_sessions').all();
+    assert.equal((await f.call(a.token,'/api/sessions/'+source.id+'/merge',{targetSessionId:target.id})).body.error.code,'MERGE_OBSERVER_CONFLICT');
+    assert.deepEqual(f.DB.database.prepare('SELECT * FROM observer_sessions').all(),before);
+    assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM session_aliases').get().n,0);
+    const observation={sessionId:id,nativeId:'exact-native',sequence:0,state:'idle',observedAt:new Date().toISOString()};
+    assert.equal((await f.call(observer.body.token,'/api/observer/observations',observation)).status,200);
+    assert.equal((await f.call(observer.body.token,'/api/observer/observations',{...observation,nativeId:'wrong-native',sequence:1})).status,409);
+    assert.equal((await f.call(observer.body.token,'/api/observer/observations',{...observation,sessionId:bound==='source'?target.id:source.id,sequence:1})).body.error.code,'OBSERVATION_CHANGED');
   }
 });

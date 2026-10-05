@@ -190,12 +190,12 @@ principal IDs; owner and service identities are immutable.
 
 POST `/api/sessions/:source/merge` accepts `{targetSessionId}`. The caller must
 own both records, or be the owner; both must belong to the same principal,
-project, machine and exact external chat. The target must have its app namespace.
+project, machine, environment and exact external chat. The target must have its app namespace.
 A legacy bare Codex UUID can pair only with `codex:<that UUID>`; arbitrary IDs
 remain case-sensitive. Similar titles are never proof of duplicate identity.
 The newer reported task/status/checkpoint wins, with both original snapshots
-retained. Claims and an uncontested observer mapping transfer atomically. Two
-observer bindings or too many combined claims refuse the merge. No native task
+retained. Claims transfer atomically. Any native observer binding or too many combined
+claims refuse the merge; native binding custody must be reconciled separately. No native task
 is completed, paused or resumed by this operation.
 
 Merged source IDs remain aliases. Registration, writes, acknowledgments and
@@ -203,7 +203,8 @@ reply validation resolve the canonical session. Inbox/conversation/attribution
 reads include its lineage while preserving original message/session/segment
 IDs, payload hashes, deliveries and cursors. Original attribution intervals
 remain partitioned by their original session, and new switches require the
-latest lineage predecessor. A merge cannot replenish a chat's daily quota.
+latest lineage predecessor. Exact attribution retries through an old ID return
+the original segment; new switches write under the canonical registration. A merge cannot replenish a chat's daily quota.
 New registration reuses a matching legacy/namespaced Codex UUID instead of
 creating another duplicate. Do not restart clients; old cached IDs keep working.
 
