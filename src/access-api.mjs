@@ -1,3 +1,6 @@
+import { sessionMessageScope } from './coordination-capacity.mjs';
+import { messageFilters } from './message-filters.mjs';
+
 import {compactMessage} from './agent-view.mjs';
 // Separate project oversight from recipient delivery and human owner custody.
 export async function accessApi(c) {
@@ -15,10 +18,17 @@ export async function accessApi(c) {
       values.push(...principal.projects);
     }
     const sessionId=url.searchParams.get('sessionId');
-    if(sessionId){const session=await sessionById(db,sessionId,principal);query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}
+    if(sessionId){
+      const session=await sessionById(db,sessionId,principal);
+      const outgoing=await sessionMessageScope(db,session.id,'m.from_session_id');
+      const incoming=await sessionMessageScope(db,session.id,'m.to_session_id');
+      query+=` AND (${outgoing.sql} OR ${incoming.sql})`;values.push(...outgoing.values,...incoming.values);
+    }
     for(const [key,column,allowed] of [['kind','m.kind',['NOTE','HANDOFF','QUESTION','ANSWER']],['reviewState','m.review_state',['PENDING','APPROVED','REJECTED']]]){
       const value=url.searchParams.get(key);if(value!==null){if(!allowed.includes(value))fail(422,'INVALID_FILTER','Select a supported conversation filter.');query+=` AND ${column}=?`;values.push(value);}
     }
+    const filters=messageFilters(url,fail,true);
+    if(filters.clauses.length){query+=' AND '+filters.clauses.join(' AND ');values.push(...filters.values);}
     const after=numeric(url.searchParams.get('after')??0,'after'),before=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
     if((before!==null||latest)&&after!==0||before!==null&&latest)fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');
     query+=' AND m.id>?';values.push(after);

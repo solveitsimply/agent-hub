@@ -1,8 +1,9 @@
 import {lifecycleView,parseCheckpoint,sendCheckIn,reconcile} from './lifecycle.mjs';
+import {canonicalSessionId} from './session-management.mjs';
 
 export async function lifecycleApi(ctx) {
   const {path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select}=ctx;
-  const helpers={fail,string,checkKeys,digest};
+  const helpers={fail,string,checkKeys,digest,messageLimits:ctx.messageLimits};
   const match=path.match(/^\/api\/sessions\/([^/]+)\/(checkpoint|closeout|accountability-policy|check-in)$/);
   if(match){
     const operation=match[2],own=method!=='GET'&&['checkpoint','closeout'].includes(operation);
@@ -90,7 +91,7 @@ export async function observerApi({request,db,path,method,readBody,digest,fail,c
   }
   if(path!=='/api/observer/observations'||method!=='POST')fail(403,'OBSERVER_SCOPE','Observer credentials can only report native state for their exact mappings.');
   const body=await readBody();checkKeys(body,['sessionId','nativeId','sequence','state','goalState','observedAt']);
-  const sessionId=string(body.sessionId,'sessionId',80),nativeId=string(body.nativeId,'nativeId',160);
+  const sessionId=await canonicalSessionId(db,string(body.sessionId,'sessionId',80)),nativeId=string(body.nativeId,'nativeId',160);
   if(!Number.isSafeInteger(body.sequence)||body.sequence<0)fail(422,'INVALID_OBSERVATION','sequence must be a nonnegative integer.');
   if(!['active','idle','waiting_user','not_loaded','offline','archived','missing'].includes(body.state))fail(422,'INVALID_OBSERVATION','Unsupported native state.');
   if(body.goalState!==undefined && body.goalState!==null && !['active','complete','paused','budget_limited','failed'].includes(body.goalState))fail(422,'INVALID_OBSERVATION','Unsupported native goal state.');

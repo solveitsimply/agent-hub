@@ -146,7 +146,8 @@ test('message and claim quotas are atomic, include pending records, and preserve
   const insert=f.DB.database.prepare('INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
   for(let i=0;i<498;i++)insert.run(a.principal.id,b.principal.id,x.id,y.id,'shared','NOTE','Synthetic','seed-'+i,'fixture',new Date().toISOString());
   const race=await Promise.all(['last','over'].map(key=>f.call(a.token,'/api/messages',payload(x,y,key))));
-  assert.deepEqual(race.map(r=>r.status).sort(),[201,409]);
+  assert.deepEqual(race.map(r=>r.status).sort(),[201,429]);
+  assert.equal(race.find(r=>r.status===429).body.error.code,'MESSAGE_SESSION_DAILY_LIMIT');
   assert.equal((await f.call(a.token,'/api/messages',data)).body.message.id,sent.body.message.id);
   for(let i=0;i<100;i++)f.DB.database.prepare('INSERT INTO ownership VALUES (?,?,?,?)').run('shared','seed-'+i,x.id,new Date().toISOString());
   assert.equal((await f.call(a.token,'/api/ownership/claim',{sessionId:x.id,resourceKey:'over'})).status,409);
@@ -155,6 +156,7 @@ test('message and claim quotas are atomic, include pending records, and preserve
 
 test('archiving cannot replenish retained-session quota; repeated metadata audits stay bounded',async t=>{
   const f=fixture(t),a=await actor(f,'a'),x=await session(f,a);
+  f.env.SESSION_LIMITS_JSON=JSON.stringify({retainedPrincipal:1000});
   const insert=f.DB.database.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,created_at,last_seen_at,archived_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
   for(let i=0;i<999;i++)insert.run(crypto.randomUUID(),a.principal.id,'old-'+i,'synthetic','fixture','shared','fixture','DONE','2020-01-01','2020-01-01','2020-01-01');
   assert.equal((await f.call(a.token,'/api/sessions',{externalId:'over',machine:'synthetic',label:'over',project:'shared',task:'over',status:'DONE'})).status,409);

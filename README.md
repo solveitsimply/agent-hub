@@ -77,8 +77,10 @@ checks reject recognizable credentials but cannot detect every secret.
 Messages expire after 30 days and audit metadata after 90 days. Session and
 attribution history remain available. Archive completed sessions after releasing
 their claims. Retained history, claims, audit rows and message admission have
-server-enforced capacity limits; archiving does not replenish retained-history
-capacity. Repeated audit metadata for the same principal/action/target is
+operator-configurable capacity limits; shared accounts have per-chat daily
+fairness and separate workspace storage budgets. Read /api/limits after a
+capacity refusal. Explicit duplicate merges preserve history and old session
+IDs; archiving does not replenish retained-history capacity. Repeated audit metadata for the same principal/action/target is
 coalesced within 24 hours and capped. The board returns up to 200 matching active sessions and reports
 the matching total; inbox and attribution history are paginated.
 

@@ -1,4 +1,7 @@
+import { searchTerm, messageFilters } from './message-filters.mjs';
 import { accessApi } from './access-api.mjs';
+import {hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
+import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
 import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint } from './lifecycle.mjs';
@@ -126,8 +129,11 @@ const sessionFilters = (url,aliases)=>{
   return {clauses,values};
 };
 const SESSION_CUSTODY_SELECT='SELECT s.id,s.project,s.principal_id,s.archived_at FROM sessions s JOIN principals p ON p.id=s.principal_id';
-async function sessionById(db,id,principal,own=false,{custodyOnly=false}={}){
-  const row=await db.prepare(`${custodyOnly?SESSION_CUSTODY_SELECT:SESSION_SELECT} WHERE s.id=?`).bind(string(id,'sessionId',80)).first();
+async function sessionById(db,id,principal,own=false,{custodyOnly=false,resolveMerged=true}={}){
+  const requested=string(id,'sessionId',80),resolved=resolveMerged?await canonicalSessionId(db,requested):requested;
+  let select=custodyOnly?SESSION_CUSTODY_SELECT:SESSION_SELECT;
+  if(!custodyOnly&&await hasCoordinationSchema(db))select=sessionHistorySelect(select);
+  const row=await db.prepare(`${select} WHERE s.id=?`).bind(resolved).first();
   if(!row)fail(404,'SESSION_NOT_FOUND','Session not found.');requireProject(principal,row.project);
   if(own&&row.principal_id!==principal.id)fail(403,'SESSION_OWNER_REQUIRED','Only the principal owning that session can update or send from it.');return row;
 }
@@ -160,13 +166,21 @@ async function api(request,env){
   const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
   const path=url.pathname,method=request.method;
+  const coordination=await hasCoordinationSchema(db);
   if(principal.profile==='observer'&&method!=='GET'&&path!=='/api/connections'&&!(path==='/api/sessions'&&method==='POST')&&!(/^\/api\/sessions\/[^/]+(?:\/(?:heartbeat|archive|attribution))?$/.test(path)&&['POST','PATCH'].includes(method)))fail(403,'OBSERVER_READ_ONLY','Project observers can read conversations and report their own sessions, but cannot send, acknowledge or manage coordination.');
   if(principal.profile==='coordinator'&&method!=='GET'&&path!=='/api/connections'&&path!=='/api/messages'&&!/^\/api\/messages\/\d+\/ack$/.test(path)&&!(path==='/api/sessions'&&method==='POST')&&!(/^\/api\/sessions\/[^/]+(?:\/(?:heartbeat|archive|attribution|checkpoint|closeout))?$/.test(path)&&['POST','PATCH','PUT'].includes(method)))fail(403,'COORDINATOR_SCOPE','Coordinators can message, relay owner-provided answers and report their own sessions; they cannot manage invitations, ownership or other sessions.');
   const accessResponse=await accessApi({path,method,url,db,principal,readBody,fail,checkKeys,string,numeric,readOptions,ownerOnly,requireProject,sessionById,requireCurrent,json,messageSelect:MESSAGE_SELECT,messageView,activePrincipal:ACTIVE_PRINCIPAL,now});
   if(accessResponse)return accessResponse;
-  const lifecycleResponse=await lifecycleApi({path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select:SESSION_SELECT,messageById});
+  const lifecycleResponse=await lifecycleApi({path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select:coordination?sessionHistorySelect(SESSION_SELECT):SESSION_SELECT,messageById,messageLimits:()=>messagePolicy(env,fail)});
   if(lifecycleResponse)return lifecycleResponse;
+  const management=await sessionManagementApi({path,method,db,principal,readBody,fail,checkKeys,string,ownerOnly,sessionById,requireActive,requireCurrent,json,sessionView,aliases,audit,now,machineName:value=>canonicalMachine(value,aliases)});
+  if(management)return management;
   if(path==='/api/me'&&method==='GET')return json({principal});
+  if(path==='/api/limits'&&method==='GET'){
+    if(!coordination)fail(503,'COORDINATION_UPGRADE_REQUIRED','Apply migration 0010 to enable message capacity reporting.');
+    const requested=url.searchParams.get('sessionId'),session=requested?await sessionById(db,requested,principal,true,{custodyOnly:true}):null;
+    return json(await messageCapacity(db,messagePolicy(env,fail),principal.id,session?.id??null));
+  }
   if(path==='/api/principals'&&method==='GET'){
     ownerOnly(principal);const rows=await db.prepare("SELECT * FROM principals WHERE id!='hub-accountability' ORDER BY created_at DESC LIMIT 200").all();return json({principals:rows.results.map(principalView)});
   }
@@ -186,7 +200,16 @@ async function api(request,env){
   }
   const principalMatch=path.match(/^\/api\/principals\/([^/]+)$/);
   if(principalMatch&&method==='PATCH'){
-    ownerOnly(principal);const body=await readBody();checkKeys(body,['profile']);
+    ownerOnly(principal);const body=await readBody();checkKeys(body,['profile','name','account']);
+    if(body.profile===undefined){
+      if(['owner','hub-accountability'].includes(principalMatch[1]))fail(403,'OWNER_IMMUTABLE','Reserved workspace identities cannot be renamed.');
+      if(body.name===undefined&&body.account===undefined)fail(422,'INVALID_FIELD','Provide a display name or account label.');
+      const name=body.name===undefined?null:string(body.name,'name',120),account=body.account===undefined?null:string(body.account,'account',160);
+      const result=await db.prepare("UPDATE principals SET name=COALESCE(?,name),account=COALESCE(?,account) WHERE id=? AND role='agent' AND active=1").bind(name,account,principalMatch[1]).run();
+      if(!result.meta.changes)fail(404,'PRINCIPAL_NOT_FOUND','Active invitation not found.');
+      await audit(db,principal,'invite.renamed',principalMatch[1]).run();return json({principal:principalView(await db.prepare('SELECT * FROM principals WHERE id=?').bind(principalMatch[1]).first())});
+    }
+    checkKeys(body,['profile']);
     if(!['agent','observer','coordinator'].includes(body.profile))fail(422,'INVALID_PROFILE','Choose agent, observer or coordinator.');
     if(['owner','hub-accountability'].includes(principalMatch[1]))fail(403,'OWNER_IMMUTABLE','Workspace identities cannot become delegates.');
     const result=await db.prepare("UPDATE principals SET access_profile=?,coordinator_access=? WHERE id=? AND role='agent' AND active=1").bind(body.profile==='agent'?'agent':'observer',body.profile==='coordinator'?1:0,principalMatch[1]).run();
@@ -201,35 +224,40 @@ async function api(request,env){
   }
   if(path==='/api/sessions'&&method==='GET'){
     const {view,limit}=readOptions(url,200);
+    const offset=numeric(url.searchParams.get('offset')??0,'offset');if(offset>2000)fail(422,'INVALID_OFFSET','Session offset must be at most 2000.');
     const project=url.searchParams.get('project');if(project)requireProject(principal,slug(project));
     let scope=' WHERE s.archived_at IS NULL',scopeValues=[];
     if(project){scope+=' AND s.project=?';scopeValues=[project];}
     else if(principal.role!=='owner'){scope+=` AND s.project IN (${principal.projects.map(()=>'?').join(',')})`;scopeValues=principal.projects;}
+    const owned=url.searchParams.get('owned');if(owned!==null){if(owned!=='1')fail(422,'INVALID_FILTER','owned must be 1.');scope+=' AND s.principal_id=?';scopeValues=[...scopeValues,principal.id];}
+    const q=searchTerm(url,fail).toLowerCase();
     const filters=sessionFilters(url,aliases),filteredScope=scope+(filters.clauses.length?' AND '+filters.clauses.join(' AND '):''),filterValues=[...scopeValues,...filters.values];
     const status=url.searchParams.get('status');if(status!==null&&status!=='WAITING'&&!STATUSES.has(status))fail(422,'INVALID_FILTER','Select a supported status.');
     const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null&&staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');
     const attention=url.searchParams.get('attention');if(attention!==null&&!ATTENTION.includes(attention))fail(422,'INVALID_FILTER','Select a supported attention category.');
     // Admission caps the workspace at 2000 active sessions. Read this authorized
     // baseline once; all counts precede the response page and status filters.
-    const rows=await db.prepare(SESSION_LIST_SELECT+filteredScope+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 2000').bind(...filterValues).all();
-    const baseline=rows.results.map(row=>sessionView(row,principal,aliases));
+    const listSelect=coordination?sessionHistorySelect(SESSION_LIST_SELECT):SESSION_LIST_SELECT;
+    const rows=await db.prepare(listSelect+filteredScope+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT 2000').bind(...filterValues).all();
+    const discovered=rows.results.map(row=>sessionView(row,principal,aliases));
+    const baseline=q?discovered.filter(session=>[session.id,session.externalId,session.label,session.task,session.project,session.machine,session.reportedMachine,session.principalName,session.account,session.environment,...Object.values(session.latestAttribution??{}),...Object.values(session.workContext??{}),session.lifecycle?.reason,session.lifecycle?.checkpoint?.nextAction,session.lifecycle?.checkpoint?.wait?.reason].some(value=>typeof value==='string'&&value.toLowerCase().includes(q))):discovered;
     const ordered=baseline.filter(session=>(status===null||(status==='WAITING'?['WAITING_ON_USER','WAITING_ON_AGENT'].includes(session.status):session.status===status))&&(staleOnly===null||(session.stale&&session.status!=='DONE'))&&(!attention||session.lifecycle.attention===attention));
-    const total=ordered.length;
-    if(view==='compact')return json({sessions:ordered.slice(0,limit).map(compactSession),limit,total,hasMore:total>limit});
+    const total=ordered.length,hasMore=offset+limit<total,nextOffset=hasMore?offset+limit:null;
+    if(view==='compact')return json({sessions:ordered.slice(offset,offset+limit).map(compactSession),limit,offset,total,hasMore,nextOffset});
     const options=filters.clauses.length
-      ? await db.prepare(`SELECT DISTINCT s.machine,s.environment,${AGENT_NAME_SQL} AS agent_name,json_extract(a.metadata_json,'$.model') AS agent_model,json_extract(s.details_json,'$.workContext.repository') AS repository,json_extract(s.details_json,'$.workContext.branch') AS branch`+SESSION_FROM+scope).bind(...scopeValues).all()
-      : {results:baseline.map(session=>({machine:session.machine,environment:session.environment,agent_name:session.latestAttribution?.client??null,agent_model:session.latestAttribution?.model??null,repository:session.workContext?.repository??null,branch:session.workContext?.branch??null}))};
+      ? await db.prepare(`SELECT DISTINCT s.machine,s.environment,${AGENT_NAME_SQL} AS agent_name,json_extract(a.metadata_json,'$.model') AS agent_model,json_extract(s.details_json,'$.workContext.repository') AS repository,json_extract(s.details_json,'$.workContext.branch') AS branch`+(coordination?sessionHistorySelect(SESSION_FROM):SESSION_FROM)+scope).bind(...scopeValues).all()
+      : {results:discovered.map(session=>({machine:session.machine,environment:session.environment,agent_name:session.latestAttribution?.client??null,agent_model:session.latestAttribution?.model??null,repository:session.workContext?.repository??null,branch:session.workContext?.branch??null}))};
     const distinct=key=>[...new Set(options.results.map(row=>row[key]??null))].sort((left,right)=>left===null?1:right===null?-1:left.localeCompare(right));
     const machines=[...new Set(options.results.map(row=>canonicalMachine(row.machine,aliases)))].sort((a,b)=>a===null?1:b===null?-1:a.localeCompare(b));
     const branches=[...new Map(options.results.map(row=>{const value=row.repository&&row.branch?{repository:row.repository,branch:row.branch}:null;return [JSON.stringify(value),value];})).values()];
     const summary={RUNNING:0,WAITING_ON_USER:0,WAITING_ON_AGENT:0,BLOCKED:0,DONE:0,stale:0};
     const accountability={categories:Object.fromEntries(ATTENTION.map(key=>[key,0])),unaccounted:0,oldestUnaccountedAt:null,checkpointCoverage:0,observerCoverage:0,total:baseline.length,unaccountedClaims:0};
     for(const session of baseline){summary[session.status]++;if(session.status!=='DONE'&&session.stale)summary.stale++;const value=session.lifecycle;accountability.categories[value.attention]++;if(value.checkpoint)accountability.checkpointCoverage++;if(value.coverage==='available')accountability.observerCoverage++;if(value.unaccounted){accountability.unaccounted++;accountability.unaccountedClaims+=value.heldClaims;if(!accountability.oldestUnaccountedAt||value.unaccountedSince<accountability.oldestUnaccountedAt)accountability.oldestUnaccountedAt=value.unaccountedSince;}}
-    return json({sessions:ordered.slice(0,limit),limit,total,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
+    return json({sessions:ordered.slice(offset,offset+limit),limit,offset,total,hasMore,nextOffset,summary,accountability,filterOptions:{agentNames:distinct('agent_name'),agentModels:distinct('agent_model'),machines,environments:distinct('environment'),branches}});
   }
   if(path==='/api/sessions'&&method==='POST'){
     const body=await readBody();checkKeys(body,['externalId','machine','label','project','task','status','environment','workContext','details','checkpoint']);
-    const project=slug(body.project);requireProject(principal,project);const externalId=string(body.externalId,'externalId',160),machine=string(body.machine,'machine',120);
+    const project=slug(body.project);requireProject(principal,project);const externalId=string(body.externalId,'externalId',160),machine=string(body.machine,'machine',120),label=string(body.label,'label',120),task=string(body.task,'task',2000);
     const status=body.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
     const id=crypto.randomUUID(),date=now();
     const environment=string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use dev, staging, production or local for the target application instance.');
@@ -238,10 +266,27 @@ async function api(request,env){
     if(checkpoint?.wait?.sessionId){const dependency=await sessionById(db,checkpoint.wait.sessionId,principal);if(dependency.project!==project)fail(403,'PROJECT_MISMATCH','Dependency must belong to this project.');}
     if(checkpoint?.wait?.messageId){const message=await messageById(db,Number(checkpoint.wait.messageId),principal);if(message.project!==project)fail(403,'PROJECT_MISMATCH','Message must belong to this project.');}
     if(checkpoint?.wait)checkpoint.waitStartedAt=date;
-    await db.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at,checkpoint_json,checkpoint_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM sessions WHERE principal_id=?)<1000 AND (SELECT COUNT(*) FROM sessions)<10000 AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL AND principal_id=?)<100 AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL)<2000 ON CONFLICT(principal_id,external_id) DO NOTHING').bind(id,principal.id,externalId,machine,string(body.label,'label',120),project,string(body.task,'task',2000),status,environment,JSON.stringify(details),date,date,checkpoint?JSON.stringify(checkpoint):null,checkpoint?date:null,principal.id,principal.id,principal.id).run();
+    const identity=registrationKeys(externalId);
+    const registered=await db.prepare(`SELECT id,external_id FROM sessions WHERE principal_id=? AND ${identity.uuid?'lower(external_id) IN (?,?)':'external_id IN (?,?)'} ORDER BY CASE WHEN external_id=? THEN 0 ELSE 1 END LIMIT 1`).bind(principal.id,...identity.keys,externalId).first();
+    if(registered&&(registered.external_id!==externalId||await canonicalSessionId(db,registered.id)!==registered.id)){
+      const current=await sessionById(db,registered.id,principal,true);
+      if(canonicalMachine(current.machine,aliases)!==canonicalMachine(machine,aliases)||current.project!==project)fail(409,'SESSION_IDENTITY_CONFLICT','That external chat belongs to another machine or project.');
+      if(identity.uuid&&externalId.startsWith('codex:')&&!current.external_id.includes(':')){
+        await db.prepare(`UPDATE sessions SET external_id=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND ${ACTIVE_PRINCIPAL}`).bind(identity.canonical,current.id,principal.id,principal.id).run();
+        await requireCurrent(db,principal);
+        await audit(db,principal,'session.normalized',current.id).run();
+      }
+      await requireCurrent(db,principal);
+      const receipt=await sessionById(db,current.id,principal,true);requireActive(receipt);
+      return json({session:sessionView(receipt,principal,aliases)});
+    }
+    const capacity=coordination?sessionPolicy(env,fail):{activePrincipal:100,activeWorkspace:2000,retainedPrincipal:1000,retainedWorkspace:10000};
+    const identityGuard=identity.uuid?' AND NOT EXISTS(SELECT 1 FROM sessions WHERE principal_id=? AND lower(external_id) IN (?,?))':'';
+    await db.prepare(`INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,environment,details_json,created_at,last_seen_at,checkpoint_json,checkpoint_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM sessions WHERE principal_id=?)<? AND (SELECT COUNT(*) FROM sessions)<? AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL AND principal_id=?)<? AND (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL)<?${identityGuard} ON CONFLICT(principal_id,external_id) DO NOTHING`).bind(id,principal.id,externalId,machine,label,project,task,status,environment,JSON.stringify(details),date,date,checkpoint?JSON.stringify(checkpoint):null,checkpoint?date:null,principal.id,principal.id,capacity.retainedPrincipal,capacity.retainedWorkspace,principal.id,capacity.activePrincipal,capacity.activeWorkspace,...(identity.uuid?[principal.id,...identity.keys]:[])).run();
     await requireCurrent(db,principal);
-    const row=await db.prepare(`${SESSION_SELECT} WHERE s.principal_id=? AND s.external_id=?`).bind(principal.id,externalId).first();
-    if(!row)fail(409,'SESSION_CAPACITY','Session capacity reached (100/2000 active or 1000/10000 retained per principal/workspace). Archiving preserves retained history.');
+    const registration=await db.prepare(`SELECT id FROM sessions WHERE principal_id=? AND ${identity.uuid?'lower(external_id) IN (?,?)':'external_id IN (?,?)'} ORDER BY CASE WHEN external_id=? THEN 0 ELSE 1 END LIMIT 1`).bind(principal.id,...identity.keys,externalId).first();
+    const row=registration?await sessionById(db,registration.id,principal,true):null;
+    if(!row)fail(409,'SESSION_CAPACITY',`Session capacity reached (${capacity.activePrincipal}/${capacity.activeWorkspace} active or ${capacity.retainedPrincipal}/${capacity.retainedWorkspace} retained per principal/workspace). Archiving preserves retained history.`);
     if(canonicalMachine(row.machine,aliases)!==canonicalMachine(machine,aliases)||row.project!==project)fail(409,'SESSION_IDENTITY_CONFLICT','That external session already belongs to a different machine or project.');
     if(row.id===id)await audit(db,principal,'session.registered',id).run();return json({session:sessionView(row,principal,aliases)},row.id===id?201:200);
   }
@@ -250,14 +295,16 @@ async function api(request,env){
     const session=await sessionById(db,attributionMatch[1],principal,method==='POST');
     if(method==='GET'){
       const after=numeric(url.searchParams.get('after')??0,'after');
-      const rows=await db.prepare('SELECT * FROM (SELECT *,COALESCE(LEAD(started_at) OVER (ORDER BY id),?) AS ended_at FROM session_attribution_segments WHERE session_id=?) WHERE id>? ORDER BY id LIMIT 201').bind(session.archived_at,session.id,after).all();
+      const scope=await sessionMessageScope(db,session.id,'session_id');
+      const rows=await db.prepare(`SELECT * FROM (SELECT a.*,COALESCE(LEAD(started_at) OVER (PARTITION BY a.session_id ORDER BY a.id),s.archived_at) AS ended_at FROM session_attribution_segments a JOIN sessions s ON s.id=a.session_id WHERE a.${scope.sql}) WHERE id>? ORDER BY id LIMIT 201`).bind(...scope.values,after).all();
       const page=rows.results.slice(0,200);
       return json({segments:page.map(row=>segmentView(row,principal)),nextCursor:rows.results.length>200?page.at(-1).id:null,limit:200});
     }
     requireActive(session);
     const body=await readBody(),parsed=parseAttribution(body,fail);
+    const attributionScope=await sessionMessageScope(db,session.id,'session_id');
     const payloadHash=await digest(JSON.stringify({metadata:parsed.metadata,previousSegmentId:parsed.previousSegmentId}));
-    await db.prepare('INSERT INTO session_attribution_segments(session_id,principal_id,idempotency_key,payload_hash,metadata_json,started_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM session_attribution_segments WHERE principal_id=?)<10000 AND (SELECT COUNT(*) FROM session_attribution_segments)<100000 AND EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND archived_at IS NULL) AND (SELECT MAX(id) FROM session_attribution_segments WHERE session_id=?) IS ? AND (SELECT COUNT(*) FROM session_attribution_segments WHERE session_id=?)<10000 ON CONFLICT(session_id,idempotency_key) DO NOTHING').bind(session.id,principal.id,parsed.idempotencyKey,payloadHash,JSON.stringify(parsed.metadata),now(),principal.id,principal.id,session.id,principal.id,session.id,parsed.previousSegmentId,session.id).run();
+    await db.prepare(`INSERT INTO session_attribution_segments(session_id,principal_id,idempotency_key,payload_hash,metadata_json,started_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM session_attribution_segments WHERE principal_id=?)<10000 AND (SELECT COUNT(*) FROM session_attribution_segments)<100000 AND EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND archived_at IS NULL) AND (SELECT MAX(id) FROM session_attribution_segments WHERE ${attributionScope.sql}) IS ? AND (SELECT COUNT(*) FROM session_attribution_segments WHERE ${attributionScope.sql})<10000 ON CONFLICT(session_id,idempotency_key) DO NOTHING`).bind(session.id,principal.id,parsed.idempotencyKey,payloadHash,JSON.stringify(parsed.metadata),now(),principal.id,principal.id,session.id,principal.id,...attributionScope.values,parsed.previousSegmentId,...attributionScope.values).run();
     await requireCurrent(db,principal);
     const row=await db.prepare('SELECT * FROM (SELECT *,LEAD(started_at) OVER (ORDER BY id) AS ended_at FROM session_attribution_segments WHERE session_id=?) WHERE idempotency_key=?').bind(session.id,parsed.idempotencyKey).first();
     if(!row)fail(409,'ATTRIBUTION_CHANGED','Session or attribution changed, or the history limit was reached. Read the current history before recording a new change.');
@@ -276,8 +323,8 @@ async function api(request,env){
   }
   const sessionMatch=path.match(/^\/api\/sessions\/([^/]+)(\/heartbeat)?$/);
   if(sessionMatch&&((method==='POST'&&sessionMatch[2])||(method==='PATCH'&&!sessionMatch[2]))){
-    const row=await sessionById(db,sessionMatch[1],principal,true);requireActive(row);const body=await readBody();
-    if(sessionMatch[2]){checkKeys(body,[]);await db.prepare('UPDATE sessions SET last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(now(),row.id,principal.id,principal.id).run();}
+    const row=await sessionById(db,sessionMatch[1],principal,true);requireActive(row);const body=await readBody();let mutation;
+    if(sessionMatch[2]){checkKeys(body,[]);mutation=await db.prepare('UPDATE sessions SET last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(now(),row.id,principal.id,principal.id).run();}
     else{
       checkKeys(body,['label','status','task','details','environment','workContext']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
       const label=body.label===undefined?row.label:string(body.label,'label',120);
@@ -285,13 +332,13 @@ async function api(request,env){
       if(body.details!==undefined && previous.workContext!==undefined)details.workContext=previous.workContext;
       if(body.workContext!==undefined)details.workContext=parseWorkContext(body.workContext,fail);
       const environment=body.environment===undefined?row.environment:string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use local, dev, staging or production for the target application instance.');
-      await db.batch([db.prepare('UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(status,task,label,JSON.stringify(details),environment,now(),row.id,principal.id,principal.id),audit(db,principal,'session.updated',row.id)]);
+      const results=await db.batch([db.prepare('UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(status,task,label,JSON.stringify(details),environment,now(),row.id,principal.id,principal.id),audit(db,principal,'session.updated',row.id)]);mutation=results[0];
     }
-    await requireCurrent(db,principal);const current=await sessionById(db,row.id,principal,true);requireActive(current);return json({session:sessionView(current,principal,aliases)});
+    await requireCurrent(db,principal);if(!mutation.meta.changes)fail(409,'SESSION_CHANGED','Registration changed before this update; reread the canonical session and retry.');const current=await sessionById(db,row.id,principal,true);requireActive(current);return json({session:sessionView(current,principal,aliases)});
   }
   if(path==='/api/messages'&&method==='POST'){
-    const retainedMessageCap=configuredMessageLimit(env,'HUB_MESSAGE_CAP_PER_PRINCIPAL_RETAINED',1000,10000);
-    const rollingMessageCap=configuredMessageLimit(env,'HUB_MESSAGE_CAP_PER_PRINCIPAL_24H',500,5000);
+    const retainedMessageCap=coordination?null:configuredMessageLimit(env,'HUB_MESSAGE_CAP_PER_PRINCIPAL_RETAINED',1000,10000);
+    const rollingMessageCap=coordination?null:configuredMessageLimit(env,'HUB_MESSAGE_CAP_PER_PRINCIPAL_24H',500,5000);
     const body=await readBody();checkKeys(body,['fromSessionId','toSessionId','project','kind','body','idempotencyKey','replyTo','ownerRelay']);const project=slug(body.project);requireProject(principal,project);
     if(!KINDS.has(body.kind))fail(422,'INVALID_KIND','Select a supported message kind.');
     const from=body.fromSessionId?await sessionById(db,body.fromSessionId,principal,true,{custodyOnly:true}):null;if(!from&&principal.role!=='owner')fail(403,'SENDER_REQUIRED','An agent must send from its own registered session.');
@@ -311,28 +358,31 @@ async function api(request,env){
       if(body.kind!=='ANSWER'||replyTo===null||!from||!to)fail(422,'INVALID_OWNER_RELAY','An owner answer relay must reply to an exact question from your own session.');
       const prior=await db.prepare(`${MESSAGE_SELECT} WHERE m.id=?`).bind(replyTo).first();
       if(!prior)fail(404,'MESSAGE_NOT_FOUND','Question not found.');requireProject(principal,prior.project);
-      if(prior.project!==project||prior.kind!=='QUESTION'||prior.to_principal_id!=='owner'||prior.to_session_id!==null||prior.from_principal_id!==recipient||prior.from_session_id!==to.id||prior.review_state==='REJECTED')fail(403,'REPLY_MISMATCH','Relay only the owner answer to the original asking session and project.');
+      if(prior.project!==project||prior.kind!=='QUESTION'||prior.to_principal_id!=='owner'||prior.to_session_id!==null||prior.from_principal_id!==recipient||await canonicalSessionId(db,prior.from_session_id)!==to.id||prior.review_state==='REJECTED')fail(403,'REPLY_MISMATCH','Relay only the owner answer to the original asking session and project.');
     }else if(replyTo!==null){
       const prior=await messageById(db,replyTo,principal);
-      if(prior.project!==project||prior.from_principal_id!==recipient||prior.to_principal_id!==principal.id||prior.from_session_id!==(to?.id??null)||prior.to_session_id!==(from?.id??null))fail(403,'REPLY_MISMATCH','Replies must reverse the original conversation.');
+      if(prior.project!==project||prior.from_principal_id!==recipient||prior.to_principal_id!==principal.id||await canonicalSessionId(db,prior.from_session_id)!==(to?.id??null)||await canonicalSessionId(db,prior.to_session_id)!==(from?.id??null))fail(403,'REPLY_MISMATCH','Replies must reverse the original conversation.');
       if(prior.to_principal_id==='owner'&&principal.role!=='owner')fail(403,'OWNER_REQUIRED','Only the owner may answer an owner question without a delegated relay.');
     }
     const validatedText=string(body.body,'body',6000),text=relayReference?body.body:validatedText,key=string(body.idempotencyKey,'idempotencyKey',160);
-    const payloadHash=await digest(JSON.stringify({from:from?.id??null,to:to?.id??null,project,kind:body.kind,body:text,replyTo,...(relayReference?{ownerRelay:relayReference}:{})}));
+    const payloadHash=await digest(JSON.stringify({from:body.fromSessionId?string(body.fromSessionId,'fromSessionId',80):null,to:body.toSessionId?string(body.toSessionId,'toSessionId',80):null,project,kind:body.kind,body:text,replyTo,...(relayReference?{ownerRelay:relayReference}:{})}));
     const date=now();
     const sendAuthority=messagingAuthority(principal);
+    const policy=coordination?messagePolicy(env,fail):null,bodyBytes=encoder.encode(text).byteLength;
+    const admission=coordination?messageAdmission(policy,date,principal.id,from?.id??null,bodyBytes):{sql:'(SELECT COUNT(*)<10000 AND COUNT(*) FILTER (WHERE from_principal_id=?)<? AND COUNT(*) FILTER (WHERE created_at>=?)<5000 AND COUNT(*) FILTER (WHERE from_principal_id=? AND created_at>=?)<? FROM messages)',values:[principal.id,retainedMessageCap,dayAgo(),principal.id,dayAgo(),rollingMessageCap]};
+    const askingScope=to?await sessionMessageScope(db,to.id,'m.from_session_id'):{sql:'m.from_session_id IS NULL',values:[]};
     // Existing deployments can send ordinary messages before migration 0009.
     // Delegated provenance and capability checks require its additive columns.
     const relayColumn=principal.capabilitySchema?',owner_relay_reference':'';
     const relayPlaceholder=principal.capabilitySchema?',?':'';
     await db.batch([
-      db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,reply_to,created_at,review_state,reviewed_at${relayColumn}) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${relayPlaceholder} WHERE ${sendAuthority} AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM messages q WHERE q.id=? AND q.project=? AND q.kind='QUESTION' AND q.to_principal_id='owner' AND q.to_session_id IS NULL AND q.from_session_id=? AND q.from_principal_id=? AND q.review_state!='REJECTED')) AND (SELECT COUNT(*)<10000 AND COUNT(*) FILTER (WHERE from_principal_id=?)<? AND COUNT(*) FILTER (WHERE created_at>=?)<5000 AND COUNT(*) FILTER (WHERE from_principal_id=? AND created_at>=?)<? FROM messages) ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(principal.id,recipient,from?.id??null,to?.id??null,project,body.kind,text,key,payloadHash,replyTo,date,'APPROVED',null,...(principal.capabilitySchema?[relayReference]:[]),principal.id,recipient,principal.id,project,recipient,project,from?.id??null,from?.id??null,principal.id,project,to?.id??null,to?.id??null,recipient,project,relayReference,replyTo,project,to?.id??null,recipient,principal.id,retainedMessageCap,dayAgo(),principal.id,dayAgo(),rollingMessageCap),
+      db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,reply_to,created_at,review_state,reviewed_at${relayColumn}) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${relayPlaceholder} WHERE ${sendAuthority} AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM messages q WHERE q.id=? AND q.project=? AND q.kind='QUESTION' AND q.to_principal_id='owner' AND q.to_session_id IS NULL AND ${askingScope.sql.replaceAll('m.','q.')} AND q.from_principal_id=? AND q.review_state!='REJECTED')) AND ${admission.sql} ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(principal.id,recipient,from?.id??null,to?.id??null,project,body.kind,text,key,payloadHash,replyTo,date,'APPROVED',null,...(principal.capabilitySchema?[relayReference]:[]),principal.id,recipient,principal.id,project,recipient,project,from?.id??null,from?.id??null,principal.id,project,to?.id??null,to?.id??null,recipient,project,relayReference,replyTo,project,...askingScope.values,recipient,...admission.values),
       db.prepare(`INSERT INTO message_deliveries(message_id) SELECT id FROM messages WHERE from_principal_id=? AND idempotency_key=? AND review_state='APPROVED' AND to_session_id IS NOT NULL AND ${sendAuthority} ON CONFLICT(message_id) DO NOTHING`).bind(principal.id,key,principal.id),
       db.prepare(`UPDATE messages SET delivery_id=(SELECT id FROM message_deliveries WHERE message_id=messages.id) WHERE from_principal_id=? AND idempotency_key=? AND review_state='APPROVED' AND to_session_id IS NOT NULL AND ${sendAuthority}`).bind(principal.id,key,principal.id),
     ]);
     await requireCurrent(db,principal);
     const row=await db.prepare(`${MESSAGE_SELECT} WHERE m.from_principal_id=? AND m.idempotency_key=?`).bind(principal.id,key).first();
-    if(!row)fail(409,'MESSAGE_CAPACITY','Session or invitation custody changed, or message capacity was reached.');if(row.payload_hash!==payloadHash)fail(409,'IDEMPOTENCY_CONFLICT','That idempotency key already belongs to different message content.');return json({message:messageView(row,principal)},201);
+    if(!row){if(coordination)await explainMessageCapacity(db,policy,principal.id,from?.id??null,bodyBytes,fail);fail(409,'MESSAGE_CAPACITY','Session or invitation custody changed, or message capacity was reached.');}if(row.payload_hash!==payloadHash)fail(409,'IDEMPOTENCY_CONFLICT','That idempotency key already belongs to different message content.');return json({message:messageView(row,principal)},201);
   }
   if(path==='/api/messages'&&method==='GET'){
     const {view,limit}=readOptions(url,100);
@@ -341,9 +391,12 @@ async function api(request,env){
     const direction=url.searchParams.get('direction')??'all';
     if(!['all','incoming'].includes(direction)||direction==='incoming'&&!sessionId)fail(422,'INVALID_DIRECTION','Use all, or incoming with an exact sessionId.');
     let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
-    if(sessionId){const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true});if(direction==='incoming'){query+=' AND m.to_session_id=?';values.push(session.id);}else{query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}}
+    if(sessionId){const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true}),incoming=await sessionMessageScope(db,session.id,'m.to_session_id');if(direction==='incoming'){query+=' AND '+incoming.sql;values.push(...incoming.values);}else{const outgoing=await sessionMessageScope(db,session.id,'m.from_session_id');query+=' AND ('+outgoing.sql+' OR '+incoming.sql+')';values.push(...outgoing.values,...incoming.values);}}
     if(!owner){query+=` AND m.review_state='APPROVED' AND m.to_session_id IS NOT NULL AND (m.from_principal_id=? OR m.to_principal_id=?) AND m.project IN (${principal.projects.map(()=>'?').join(',')})`;values.push(principal.id,principal.id,...principal.projects);}
     const reviewState=url.searchParams.get('reviewState');if(reviewState!==null){ownerOnly(principal);if(!['PENDING','APPROVED','REJECTED'].includes(reviewState))fail(422,'INVALID_REVIEW','Select a supported review state.');query+=' AND m.review_state=?';values.push(reviewState);}
+    const filters=messageFilters(url,fail,owner);
+    if(filters.clauses.length){query+=' AND '+filters.clauses.join(' AND ');values.push(...filters.values);}
+    const project=url.searchParams.get('project');if(project){requireProject(principal,slug(project));query+=' AND m.project=?';values.push(project);}
     const kind=url.searchParams.get('kind');
     if(kind!==null){if(!KINDS.has(kind))fail(422,'INVALID_KIND','Select a supported message kind.');query+=' AND m.kind=?';values.push(kind);}
     const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
@@ -359,7 +412,7 @@ async function api(request,env){
   if(ackMatch&&method==='POST'){
     const body=await readBody();checkKeys(body,['sessionId']);const row=await messageById(db,numeric(ackMatch[1],'messageId'),principal);
     if(row.to_principal_id!==principal.id)fail(403,'RECIPIENT_REQUIRED','Only the recipient can acknowledge a message.');
-    if(row.to_session_id){const session=await sessionById(db,body.sessionId,principal,true,{custodyOnly:true});if(session.id!==row.to_session_id)fail(403,'RECIPIENT_REQUIRED','Select the exact receiving session.');}
+    if(row.to_session_id){const session=await sessionById(db,body.sessionId,principal,true,{custodyOnly:true});if(session.id!==await canonicalSessionId(db,row.to_session_id))fail(403,'RECIPIENT_REQUIRED','Select the exact receiving session.');}
     else if(principal.role!=='owner'||body.sessionId!==undefined)fail(403,'OWNER_REQUIRED','Owner questions require owner acknowledgment.');
     if(row.review_state!=='APPROVED'&&!(principal.role==='owner'&&row.to_session_id===null))fail(403,'MESSAGE_NOT_DELIVERED','Only an approved delivery or human owner question can be acknowledged.');
     await db.prepare(`UPDATE messages SET acknowledged_at=COALESCE(acknowledged_at,?) WHERE id=? AND to_principal_id=? AND (review_state='APPROVED' OR to_session_id IS NULL) AND ${messagingAuthority(principal)}`).bind(now(),row.id,principal.id,principal.id).run();await requireCurrent(db,principal);return json({message:messageView(await messageById(db,row.id,principal),principal)});
@@ -395,7 +448,7 @@ export default {
       if(!['GET','HEAD'].includes(request.method))return json({error:{code:'METHOD_NOT_ALLOWED',message:'Use a supported method.'}},405);
       return await env.ASSETS.fetch(request);
     }catch(error){
-      if(error instanceof HttpError)return json({error:{code:error.code,message:error.message}},error.status);
+      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code))response.headers.set('Retry-After',String(Math.max(1,Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000))));return response;}
       for(let current=error,depth=0;current&&depth<3;current=current.cause,depth++){
         if(typeof current.message==='string'&&current.message.includes("Your account has exceeded D1's free tier daily row read limit")){
           const response=json({error:{code:'STORAGE_READ_QUOTA_EXCEEDED',message:'The Hub storage daily read allowance is exhausted. The owner can review account capacity; the free allowance resets at 00:00 UTC.'}},503);
@@ -413,6 +466,7 @@ export default {
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCMinutes()!==17)return;
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();
     await env.DB.batch([env.DB.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),env.DB.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
+    if(await hasCoordinationSchema(env.DB))await env.DB.prepare('DELETE FROM hub_message_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
     try{await env.DB.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
   },
 };
