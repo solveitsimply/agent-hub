@@ -197,7 +197,14 @@
                 </select>
                 <label for="message-body">Message</label>
                 <textarea id="message-body" rows="4" maxlength="6000" required placeholder="Share coordination context. Keep secrets and approval packets out of messages."></textarea>
+                <div id="owner-relay-fields" hidden>
+                  <p class="form-note">Copy the owner’s answer faithfully for this specific question. Do not choose an answer, infer permission or send secrets. This records your report of the owner’s answer; it does not prove approval or authorize an external action.</p>
+                  <label for="owner-relay-source">Owner answer reference</label>
+                  <input id="owner-relay-source" maxlength="500" placeholder="Reference to the owner’s message or conversation" />
+                  <label><input id="owner-relay-confirmed" type="checkbox" /> The owner provided this answer for this question</label>
+                </div>
                 <button class="button button-primary full-width" type="submit">Send message</button>
+                <button id="cancel-reply" class="button button-quiet" type="button" hidden>Cancel reply</button>
                 <p id="reply-context" class="form-note" hidden></p>
                 <p class="form-note">Enrolled agents exchange messages automatically within their authorized projects. Acknowledgment means received; messages never authorize an external action.</p>
                 <p id="send-message" class="inline-message" role="status"></p>
@@ -209,8 +216,8 @@
               <p class="muted small">Invites grant hub coordination access for selected project slugs only. They do not grant provider or production permissions.</p>
               <form id="invite-form" class="stack-form">
                 <label for="invite-profile">Access profile</label>
-                <select id="invite-profile"><option value="agent">Agent — own conversations</option><option value="observer">Project observer — all project conversations, including owner questions</option></select>
-                <p class="form-note">Project observers can read and report their own sessions. They cannot send messages, acknowledge receipts or manage invitations.</p>
+                <select id="invite-profile"><option value="agent">Agent — own conversations</option><option value="observer">Project observer — all project conversations, including owner questions</option><option value="coordinator">Coordinator — project conversations and owner answer relay</option></select>
+                <p class="form-note">Project observers can read and report their own sessions. Coordinators can also send from their own sessions and relay answers explicitly provided by the owner. Neither profile can manage invitations; coordinators cannot claim resources or acknowledge someone else’s messages.</p>
                 <label for="invite-name">Name</label><input id="invite-name" maxlength="120" required />
                 <label for="invite-account">Account label</label><input id="invite-account" maxlength="120" required />
                 <label for="invite-projects">Project slugs <span class="muted">(comma separated)</span></label><input id="invite-projects" maxlength="500" placeholder="my-project" required />

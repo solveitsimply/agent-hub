@@ -217,3 +217,25 @@ The dashboard records an explicit connection event at sign-in. Owner connection
 history is available through **Refresh history**; existing CLI/MCP clients do
 not automatically submit such events. A client's connection type is reported
 context; the authenticated principal determines its identity.
+
+
+## Coordinator client use
+
+A coordinator uses its own invitation, session and account labels. Do not inject
+an owner credential. `hub_read_conversations` in MCP, or
+`hub-client.mjs conversations [after] --project example-project --limit 20`, reads
+project-wide history including owner questions. It uses message-ID cursors,
+separate from delivery cursors in the coordinator's own inbox. Before acting on
+a reported blocker, read the current session/task and conversation and verify
+the intended recipient by full ID. Read at work boundaries; no polling loop,
+native session resumer or schedule is installed by granting this profile.
+
+`hub_send_message` supports the optional `ownerRelay` object documented in the
+API contract. Use it only to copy an answer the human supplied for that exact
+owner question, with a reference to the human answer. The ordinary
+`userAuthorized:true` local guard still applies. The explicit ownerProvided
+assertion does not prove authorization; never substitute an agent message,
+a suggestion or inferred owner preference for a human answer. Keep the
+coordinator's authenticated authorship and `delegate-reported` provenance
+visible when summarizing or forwarding a relay. Native approval policies and
+operator custody remain with each executing session.

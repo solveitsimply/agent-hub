@@ -385,3 +385,22 @@ test('MCP metrics record one explicit call without logging payloads or changing 
   assert.ok(!text.includes(TOKEN));assert.ok(!text.includes('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'));
   assert.equal(JSON.parse(text).total.calls,1);assert.equal(JSON.parse(text).total.emptyInboxes,1);
 });
+
+
+test('CLI/MCP coordinator reads keep message-ID cursors and relay provenance through the bridge',async t=>{
+  const requests=[],ownerRelay={ownerProvided:true,sourceReference:'Human turn 7 for question 41'};
+  const url=await localServer(t,async(request,response)=>{
+    let raw='';for await(const chunk of request)raw+=chunk;
+    requests.push({url:request.url,body:raw?JSON.parse(raw):undefined});
+    response.writeHead(200,{'content-type':'application/json'});
+    response.end(JSON.stringify(raw?{message:{id:42,fromPrincipalId:'delegate',fromPrincipalName:'Coordinator',ownerRelay:{source:'delegate-reported',sourceReference:ownerRelay.sourceReference}}}:{messages:[{id:41,body:'Owner question'}],nextCursor:41}));
+  });
+  const cli=await runCli(['conversations','40','--project','alpha','--limit','1'],{url});assert.equal(cli.code,0,cli.stderr);
+  let query=new URL(requests[0].url,url);assert.equal(query.pathname,'/api/conversations');assert.equal(query.searchParams.get('after'),'40');assert.equal(query.searchParams.get('project'),'alpha');
+  const bridge=startBridge(url);t.after(()=>bridge.child.kill());
+  bridge.send({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'hub_read_conversations',arguments:{project:'alpha',before:42,limit:1}}});
+  const read=JSON.parse(await bridge.next());assert.equal(read.result.isError,undefined);query=new URL(requests[1].url,url);assert.equal(query.pathname,'/api/conversations');assert.equal(query.searchParams.get('before'),'42');
+  const args={fromSessionId:'coordinator-session',toSessionId:'asking-session',project:'alpha',kind:'ANSWER',body:'  Exact human answer\n',replyTo:41,idempotencyKey:'human-relay',ownerRelay,userAuthorized:true};
+  bridge.send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'hub_send_message',arguments:args}});
+  const relay=JSON.parse(await bridge.next());assert.equal(relay.result.isError,undefined);assert.deepEqual(requests[2].body.ownerRelay,ownerRelay);assert.equal(requests[2].body.body,args.body);assert.equal('userAuthorized' in requests[2].body,false);assert.match(JSON.stringify(relay),/delegate-reported/);assert.match(JSON.stringify(relay),/Human turn 7/);
+});

@@ -11,7 +11,7 @@ export function compactSession(session) {
   return result;
 }
 
-export const compactMessage = message => pick(message, ['id','fromSessionId','toSessionId','project','kind','body','replyTo','createdAt','acknowledgedAt','deliveryCursor']);
+export const compactMessage = message => pick(message, ['id','fromSessionId','toSessionId','project','kind','body','replyTo','createdAt','acknowledgedAt','deliveryCursor','ownerRelay','fromPrincipalId','fromPrincipalName']);
 
 // Write receipts omit echoed content; explicit lifecycle/history reads stay full.
 export function compactReceipt(result) {
@@ -20,6 +20,6 @@ export function compactReceipt(result) {
     ...(result.session.lifecycle ? {lifecycle:pick(result.session.lifecycle, ['revision','attention','heldClaims'])} : {}),
   }};
   if (result.lifecycle) return {...result,lifecycle:pick(result.lifecycle,['revision','attention','heldClaims'])};
-  if (result.message) return {...result, message:pick(result.message, ['id','fromSessionId','toSessionId','project','kind','replyTo','createdAt','acknowledgedAt','deliveryCursor'])};
+  if (result.message) return {...result, message:pick(result.message, ['id','fromSessionId','toSessionId','project','kind','replyTo','createdAt','acknowledgedAt','deliveryCursor','ownerRelay','fromPrincipalId','fromPrincipalName'])};
   return result;
 }

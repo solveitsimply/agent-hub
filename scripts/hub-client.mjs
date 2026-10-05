@@ -121,7 +121,7 @@ export async function readJsonStdin(stdin = process.stdin) {
 }
 
 function usage() {
-  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--direction incoming|all --kind KIND --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
+  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--direction incoming|all --kind KIND --limit N --view compact|full] | conversations [after] [--project PROJECT --session-id ID --kind KIND --review-state STATE --before N --latest --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
@@ -129,7 +129,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   const view=viewIndex<0?'compact':argv[viewIndex+1];
   if(!['compact','full'].includes(view)) throw new HubClientError('USAGE','view must be compact or full.');
   // Read commands parse their own options; other commands use this for receipts.
-  const read=['sessions','inbox'].includes(argv[0]);
+  const read=['sessions','inbox','conversations'].includes(argv[0]);
   const input=read||viewIndex<0?argv:[...argv.slice(0,viewIndex),...argv.slice(viewIndex+2)];
   const result=await runCliRaw(input,env);
   return view==='compact'&&argv[0]!=='lifecycle'?compactReceipt(result):result;
@@ -155,6 +155,14 @@ async function runCliRaw(argv, env) {
       if(positional.length>1 || (positional.length && options.project!==undefined)) throw new HubClientError('USAGE',usage());
       if(positional.length) options.project=positional[0];
       return client.request('GET','/api/sessions',{query:readQuery(options,sessionFilterNames,sessionFlagNames)});
+    }
+    case 'conversations': {
+      const {options,positional}=cliOptions(args,['project','sessionId','kind','reviewState','before'],['latest']);
+      if(positional.length>1)throw new HubClientError('USAGE',usage());
+      const {before,latest,...filters}=options,query=readQuery(filters,['project','sessionId','kind','reviewState'],[],100);
+      if(positional.length){if(!/^(0|[1-9]\d*)$/.test(positional[0]))throw new HubClientError('USAGE','after must be a nonnegative integer.');query.after=Number(positional[0]);}
+      if(before!==undefined){if(!/^(0|[1-9]\d*)$/.test(before))throw new HubClientError('USAGE','before must be a nonnegative integer.');query.before=Number(before);}
+      if(latest)query.latest='1';return client.request('GET','/api/conversations',{query});
     }
     case 'register':
       if (args.length) break;
