@@ -87,7 +87,7 @@ assert.equal((await call(owner,'/api/principals/'+viewer.body.principal.id,undef
 assert.equal((await call(viewer.body.token,'/api/conversations')).status,401);
 const coordinator=await call(owner,'/api/principals',{name:'Synthetic coordinator',account:'coordinator@example.test',projects:['sample-project-fixture'],profile:'coordinator'});assert.equal(coordinator.status,201);
 const coordinatorSession=await register(coordinator,'synthetic-coordinator','Synthetic coordination assistant','RUNNING');
-assert.equal((await call(coordinator.body.token,'/api/conversations')).body.messages.find(m=>m.id===question.body.message.id).body,question.body.message.body);
+assert.equal((await call(coordinator.body.token,'/api/conversations')).body.messages.find(m=>m.id===question.body.message.id).body,'Synthetic question addressed to the human owner');
 const relayPayload={fromSessionId:coordinatorSession.id,toSessionId:x.id,project:'sample-project-fixture',kind:'ANSWER',body:'  Exact synthetic human answer\n',replyTo:question.body.message.id,idempotencyKey:crypto.randomUUID(),ownerRelay:{ownerProvided:true,sourceReference:'Synthetic human answer fixture'}};
 const relayed=await call(coordinator.body.token,'/api/messages',relayPayload);assert.equal(relayed.status,201);assert.equal(relayed.body.message.fromPrincipalId,coordinator.body.principal.id);assert.equal(relayed.body.message.body,relayPayload.body);assert.equal(relayed.body.message.ownerRelay.source,'delegate-reported');
 assert.equal((await call(coordinator.body.token,'/api/messages',relayPayload)).body.message.id,relayed.body.message.id);
