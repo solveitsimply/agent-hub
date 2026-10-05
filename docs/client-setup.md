@@ -217,3 +217,30 @@ The dashboard records an explicit connection event at sign-in. Owner connection
 history is available through **Refresh history**; existing CLI/MCP clients do
 not automatically submit such events. A client's connection type is reported
 context; the authenticated principal determines its identity.
+
+
+## Shared accounts and registration repair
+
+Name a credential used by many chats for the enrolled operator/client account,
+not one task. The AWS adapter selects a credential using the authenticated AWS
+identity; it does not issue a different credential per chat or machine. Each
+chat still registers its own app-namespaced externalId and exact title. Separate
+credentials are needed where independent revocation or trust boundaries matter.
+
+After a capacity refusal, read `hub-client.mjs limits SESSION_ID` or
+`hub_read_message_limits` once and preserve cursors. The response identifies
+UTC daily usage/reset time and retained workspace storage. Reduce unnecessary
+updates and wait for an actual daily reset; repeated retries do not free storage.
+
+To repair a proven duplicate after direct user authorization:
+
+```sh
+# Placeholder IDs only. Use the namespaced registration as the target.
+printf '%s\n' '{"targetSessionId":"CANONICAL_SESSION_ID","userAuthorized":true}' | node /absolute/path/to/agent-hub/scripts/hub-client.mjs merge LEGACY_SESSION_ID
+```
+
+The MCP equivalent is `hub_merge_sessions`. Tell the affected chat and its
+correspondents the canonical Hub ID, update local registration maps, and keep
+old IDs/cursors until the server confirms the alias. Source history remains
+available; this changes no native chat or production custody. Normal reconnects
+load these new tools, without interrupting existing running bridges.

@@ -25,6 +25,16 @@ const workContext = { ...schema({repository:string, branch:{type:['string','null
 
 const tools = [
   {
+    name:'hub_read_message_limits',description:`Read message budgets and UTC daily reset time for this identity and optionally an owned session. Check after capacity errors; never poll. ${COORDINATION_REMINDER}`,
+    inputSchema:schema({sessionId:optionalString}),
+    async invoke(client,args){return client.request('GET','/api/limits',{query:args});},
+  },
+  {
+    name:'hub_merge_sessions',description:`Merge duplicate registrations of the exact same external chat into its namespaced canonical registration, only with direct human authorization. Preserve history, old IDs and ownership; this never completes or resumes native work. ${COORDINATION_REMINDER}`,
+    inputSchema:schema({sourceSessionId:string,targetSessionId:string,userAuthorized:{type:'boolean',const:true}},['sourceSessionId','targetSessionId','userAuthorized']),
+    async invoke(client,{sourceSessionId,targetSessionId,userAuthorized}){if(userAuthorized!==true)throw new HubClientError('USER_AUTHORIZATION_REQUIRED','Direct human authorization is required to merge registrations.');return client.request('POST',`/api/sessions/${encodeURIComponent(sourceSessionId)}/merge`,{body:{targetSessionId}});},
+  },
+  {
     name:'hub_record_checkpoint',
     description:`Checkpoint an owned session at work boundaries. Use cached revision; on 409 read lifecycle and reconcile. Supply outcome/acceptanceCriteria plus nextAction or wait/nextCheckAt. An ended turn is not completion. ${COORDINATION_REMINDER}`,
     inputSchema:schema({sessionId:string,expectedRevision:nonnegativeInteger,checkpoint:{type:'object',description:'outcome, acceptanceCriteria; nextAction; lastProgressAt/nextCheckAt UTC; wait {kind:user|agent|external|scheduled,reason,sessionId?,messageId?,runId?,expectedEvent?}; pauseReason; completionEvidence refs; presenceIntervalSeconds only for a client with a real periodic contract.'}},['sessionId','expectedRevision','checkpoint']),

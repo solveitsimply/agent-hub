@@ -1,3 +1,5 @@
+import {hasCoordinationSchema,messageAdmission,messagePolicy} from './coordination-capacity.mjs';
+
 // Agent progress, native presence and human attention are independent evidence.
 export const ATTENTION = ['WAITING_USER','READY','RECONCILE','WAITING','WORKING','PAUSED','CLEANUP','COMPLETE'];
 const parse = value => value ? JSON.parse(value) : null;
@@ -83,7 +85,7 @@ export function parseCheckpoint(value, {fail,checkKeys,string}, time=Date.now())
 
 // A one-message episode survives retries, cron overlap, archive/revocation races,
 // and retention of the message. No timer changes status, claims or native state.
-export async function sendCheckIn(db,row,{digest,fail},time=Date.now(),automatic=false) {
+export async function sendCheckIn(db,row,{digest,fail,messageLimits},time=Date.now(),automatic=false) {
   const view=lifecycleView(row,time);
   if(view.checkIn?.revision===row.revision)return {messageId:view.checkIn.messageId,state:view.checkIn.state,reused:true};
   if(!view.canCheckIn)fail(409,'CHECK_IN_SUPPRESSED','Reconcile current execution, wait or observer availability before asking again.');
@@ -95,8 +97,9 @@ export async function sendCheckIn(db,row,{digest,fail},time=Date.now(),automatic
   // at the write boundary. A new observation invalidates the initial decision.
   const valid=`s.id=? AND s.revision=? AND s.archived_at IS NULL AND s.status NOT IN ('DONE','WAITING_ON_USER') AND EXISTS(SELECT 1 FROM principals p WHERE p.id=s.principal_id AND p.active=1) AND NOT EXISTS(SELECT 1 FROM observer_sessions os JOIN observers o ON o.id=os.observer_id WHERE os.session_id=s.id AND (o.active=0 OR o.expires_at<=? OR os.observed_at IS NULL OR os.observed_at<? OR os.state IN ('active','waiting_user','offline') OR os.goal_state IN ('paused','budget_limited','failed'))) AND NOT EXISTS(SELECT 1 FROM session_check_ins ci WHERE ci.session_id=s.id AND ci.revision=s.revision) AND (SELECT COUNT(*) FROM session_check_ins ci WHERE ci.session_id=s.id AND ci.created_at>=?)<COALESCE((SELECT daily_limit FROM accountability_policies WHERE session_id=s.id),1)${automatic?' AND EXISTS(SELECT 1 FROM accountability_policies WHERE session_id=s.id AND check_in_enabled=1)':''}`;
   const values=[row.id,row.revision,date,new Date(time-180000).toISOString(),since];
+  const admission=await hasCoordinationSchema(db)?messageAdmission(messageLimits?messageLimits():messagePolicy({},fail),date,'hub-accountability',null,new TextEncoder().encode(body).byteLength):{sql:'(SELECT COUNT(*) FROM messages)<10000 AND (SELECT COUNT(*) FROM messages WHERE created_at>=?)<5000',values:[since]};
   await db.batch([
-    db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,created_at,review_state) SELECT 'hub-accountability',s.principal_id,NULL,s.id,s.project,'QUESTION',?,?,?,?, 'APPROVED' FROM sessions s WHERE ${valid} AND (SELECT COUNT(*) FROM messages)<10000 AND (SELECT COUNT(*) FROM messages WHERE created_at>=?)<5000 ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(body,key,hash,date,...values,since),
+    db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,created_at,review_state) SELECT 'hub-accountability',s.principal_id,NULL,s.id,s.project,'QUESTION',?,?,?,?, 'APPROVED' FROM sessions s WHERE ${valid} AND ${admission.sql} ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(body,key,hash,date,...values,...admission.values),
     db.prepare(`INSERT INTO message_deliveries(message_id) SELECT id FROM messages WHERE from_principal_id='hub-accountability' AND idempotency_key=? ON CONFLICT(message_id) DO NOTHING`).bind(key),
     db.prepare(`UPDATE messages SET delivery_id=(SELECT id FROM message_deliveries WHERE message_id=messages.id) WHERE from_principal_id='hub-accountability' AND idempotency_key=?`).bind(key),
     db.prepare(`INSERT INTO session_check_ins(session_id,revision,message_id,created_at) SELECT to_session_id,?,id,created_at FROM messages WHERE from_principal_id='hub-accountability' AND idempotency_key=? ON CONFLICT(session_id,revision) DO NOTHING`).bind(row.revision,key),

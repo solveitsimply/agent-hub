@@ -98,3 +98,50 @@ rollout. If database capacity is exhausted, deploy the verified compatible
 Worker/assets to stop background traffic, then verify authenticated reads after
 the UTC reset. Export and verify a private backup before applying pending
 migrations. Keep sessions, message cursors, enrollment and ownership intact.
+
+
+## Messaging browser verification
+
+Start a fresh `scripts/local-server.mjs` fixture with a synthetic `OWNER_TOKEN`
+and `PORT=8798`. It keeps its database in memory and has no external provider
+connections. Run `scripts/verify-message-ux.mjs` under Node 22.21.1 with
+`HUB_FIXTURE_OWNER_TOKEN` set to that same synthetic token. The optional
+`HUB_BROWSER_MODULE` points to an already installed Playwright module;
+`HUB_BROWSER_EXECUTABLE` can select an existing compatible Chromium binary.
+No browser dependency is required by the application. The lineage display
+check uses a simulated authorized response when new registrations already
+deduplicate; structural unit tests seed actual pre-upgrade duplicate rows.
+
+The browser check seeds synthetic accounts and sessions, verifies sending and
+answering with fixed recipient context, session and message search, sender
+discovery independent of board filters and beyond 200 owned sessions,
+lineage attribution rendering, owner/observer custody, modal dismissal
+and disconnect cleanup, and desktop/390px overflow. Screenshots go to ignored
+`.evidence/message-ux/` unless `HUB_FIXTURE_EVIDENCE_DIR` is provided. Shut down
+the fixture and its browser after verification; remove disposable runtimes and
+build output. Keep screenshots only while review or acceptance needs them.
+
+
+## Coordination capacity upgrade
+
+Before migration 0009, export and verify a private backup of the existing D1
+instance. Apply only pending migrations, then deploy the matching verified
+Worker/assets. Migration 0009 backfills daily counters and retained body-byte
+usage for all existing review states, adds an index for reply custody, and
+stores session aliases/snapshots without rewriting messages or cursors. Retain
+the backup through hosted acceptance and the agreed recovery window.
+
+Use private Worker vars MESSAGE_LIMITS_JSON and SESSION_LIMITS_JSON for the
+operator's budgets. Defaults keep complete sender/discovery bounds and leave
+provider headroom; they do not guarantee free hosting. Review actual Cloudflare
+account-wide Worker/D1 usage, including indexes and other applications. Quota
+counters avoid retained-message scans; the reply index also avoids foreign-key
+scans during insertion. Cleanup prunes old daily buckets during the existing
+retention cron, without background polling or check-in messages.
+
+Verify old IDs, exact retries, aliases, attribution intervals, recipient custody,
+claims and independent-principal/project refusals before merging live duplicate
+registrations. Rename shared invitation display labels through owner-only
+administration, preserving its credential and enrollment. Send one authorized
+merge notice to the affected chat and known correspondents, and update private
+registration maps. Never archive or delete message history to escape quotas.

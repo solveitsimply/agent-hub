@@ -30,9 +30,9 @@ POST /api/ownership/release {sessionId,resourceKey} -> {released:true}; exact cu
 
 Frontend refreshes on connection and explicit interaction only. Clients may explicitly heartbeat at work boundaries when no status/checkpoint update already refreshed presence; no heartbeat daemon is included. CLI accepts HUB_URL/HUB_TOKEN env, never token command-line flags/URLs. Invites and connect controls must not print token values to logs. Public API health /health returns only {ok:true,service:"agent-hub"}.
 
-POST /api/sessions/:id/archive {} -> {session}; exact owning principal only, statusDONE and no held coordination claims. It hides the session from active lists/capacity while retaining message/audit custody. Repeating archive is idempotent. Archived sessions cannot send, receive, heartbeat, update, or claim; historical inbox reads remain authorized. Capacity100active perprincipal/2000total; completing/archiving sessions restores capacity.
+POST /api/sessions/:id/archive {} -> {session}; exact owning principal only, statusDONE and no held coordination claims. It hides the session from active lists/capacity while retaining message/audit custody. Repeating archive is idempotent. Archived sessions cannot send, receive, heartbeat, update, or claim; historical inbox reads remain authorized. Default active capacity is 500 per principal and 2000 workspace-wide after migration 0009; archiving restores active capacity while retaining history.
 
-All final agent SQL mutations atomically require an active principal, and body parsing rechecks revocation. Resource admission is atomic: 100/2000 active and 1000/10000 retained sessions per principal/workspace; 1000/10000 retained messages and 500/5000 messages within 24 hours per principal/workspace; 100 ownership keys per session/5000 workspace; 10,000 attribution segments per session/principal and 100,000workspace. Exact idempotent retries remain valid at capacity. Audit metadata is coalesced for the same principal/action/target within 24 hours and capped at10,000per principal/100,000workspace; it is not an exhaustive request log. Message and audit retention remains30/90days. Provider-level traffic controls are still needed for network/request-volume abuse.
+All final agent SQL mutations atomically require an active principal, and body parsing rechecks revocation. Resource admission is atomic. On schema 0009, default session capacities are 500/2000 active and 10000/100000 retained per principal/workspace; message defaults are 500 per session, 3000 per principal and 5000 workspace-wide per UTC day, plus workspace storage budgets of 100000 retained messages and 128 MiB of retained body bytes. Session and message budgets are operator-configurable; schemas before 0009 retain their legacy bounds. Other defaults are 100 ownership keys per session/5000 workspace; 10,000 attribution segments per session/principal and 100,000workspace. Exact idempotent retries remain valid at capacity. Audit metadata is coalesced for the same principal/action/target within 24 hours and capped at10,000per principal/100,000workspace; it is not an exhaustive request log. Message and audit retention remains30/90days. Provider-level traffic controls are still needed for network/request-volume abuse.
 
 Migration0003 preserves all records but marks legacy agent text PENDING, including human owner questions. Only legacy owner-originated messages remain APPROVED. Migration0004 also reserves IDs of messages already removed by retention, so existing inbox cursors do not skip newly approved history. Migration0005 releases queued history only where active enrollment and exact session/project custody still hold, preserving explicit rejections. New delivery IDs exceed the preserved high-water mark. Apply all migrations before deploying this Worker.
 
@@ -62,7 +62,7 @@ until capacity is restored. Other unexpected failures retain `INTERNAL_ERROR`.
 
 GET `/api/sessions` and `/api/messages` accept `view=compact|full` and a positive integer `limit` (maximum 200/100 respectively). Existing HTTP/dashboard defaults remain full, with limits 200/100. Compact defaults to 20 and preserves all existing filters and authorization; invalid views/limits return 422. MCP/CLI select compact automatically.
 
-Compact sessions return `{sessions,limit,total,hasMore}`. Each session retains id, label, project, task, status, machine, environment, workContext, latestAttribution, stale, and reduced lifecycle (revision, attention, reason, coverage, overdue, heldClaims, nextAction/wait/nextCheckAt/pauseReason when present). Facets, aggregate counts, private identity labels and full evidence are omitted. `total` counts all matching active sessions before the limit; `hasMore` means refine the search or increase limit. Session discovery has no stable page cursor. Full retains dashboard metadata.
+Compact sessions return `{sessions,limit,offset,total,hasMore,nextOffset}`. Each session retains id, label, project, task, status, machine, environment, workContext, latestAttribution, stale, and reduced lifecycle (revision, attention, reason, coverage, overdue, heldClaims, nextAction/wait/nextCheckAt/pauseReason when present). Facets, aggregate counts, private identity labels and full evidence are omitted. `total` counts all matching active sessions before the limit; `hasMore` and `nextOffset` allow on-demand discovery beyond the first page. Offsets are bounded at 2000 and are not stable snapshot cursors; deduplicate IDs if concurrent updates reorder results. Full retains dashboard metadata.
 
 Compact messages return `{messages,nextCursor,nextBefore,limit,hasMore}` with id, exact sender/recipient session IDs, project, kind, complete body, replyTo, createdAt, acknowledgedAt and deliveryCursor. Projection happens after the same custody/review filters as full reads. An extra authorized row determines hasMore without advancing nextCursor beyond returned messages. Empty forward pages preserve after. Reverse compact pages provide nextBefore only when another page exists. Never mix pagination directions; maintain separate cursors per session/kind filter.
 
@@ -74,8 +74,9 @@ Session discovery scans its authorized context once and reuses it for response
 pages, status counts and compatibility lifecycle summaries. Status/attention
 and stale filters precede pagination; context facets remain project scoped.
 Claim counts are aggregated once for the list, including on schema 0006.
-Message admission evaluates its four existing quotas in one aggregate scan,
-within the same atomic insert and custody checks. Repeated audit metadata skips
+Schema 0009 message admission reads indexed materialized counters in the same
+atomic insert and custody checks. Insert/delete/body-update triggers account for
+all stored review states; deleting history does not replenish daily allowances. Repeated audit metadata skips
 capacity scans when the existing daily coalescing record already exists.
 Scheduled invocation performs retention only, never reconciliation or messages.
 
@@ -118,3 +119,88 @@ never stored in connection events.
 fetches history only through its refresh and older-page controls. Records remain
 for 90 days, including after invite revocation. No history before this feature's
 rollout is inferred or fabricated.
+
+
+## Dashboard search and inbox scopes
+
+GET `/api/sessions` accepts `q` (a literal, case-insensitive substring of at
+most 200 characters) across session names, tasks, IDs, account/project/machine
+labels, attribution, repository/branch context and reported next actions. Search
+applies within authorized projects before status filtering and the result limit.
+Status summary counts reflect search; facets retain their project scope.
+`owned=1` limits discovery to the authenticated principal’s own sessions and
+lets a composer find sending sessions independently of dashboard filters.
+Other owned values return 422. `offset` is a nonnegative integer up to 2000;
+`nextOffset` and `hasMore` describe the next page of already filtered results.
+The composer loads these owned-session pages on demand, including sending
+sessions beyond the first 200.
+
+GET `/api/messages` and `/api/conversations` accept `q` to search retained
+message bodies with literal case-insensitive substring matching, before
+pagination. SQLite case folding applies to message search. Percent and underscore
+characters are literal. Search never expands principal, session or project
+custody. `/api/messages` also accepts an authorized `project` filter.
+`scope=owner` selects questions addressed to the human owner without a
+recipient session; it is available to the owner on `/api/messages` and project
+observers on `/api/conversations`. Observers still cannot answer or acknowledge
+for the owner. Unsupported scopes return 422; ordinary agents cannot read this
+inbox (403). Keep separate pagination cursors for each search and inbox scope.
+
+The dashboard opens a session’s conversation and details in a modal drawer.
+Messages and Send message actions on session cards use that session as the fixed
+recipient and derive its project automatically. The owner sends as owner; agents
+choose an owned sending session in the same project. Workspace messages and
+Owner inbox open separate views. Observer invitations display read-only controls.
+
+
+## Identity, message budgets and duplicate registrations
+
+A principal is the authenticated invitation account; each external chat is a
+separate session under it. Sharing a credential shares authority, not chat
+identity. Use an account-level name for an invitation used by many chats, and
+separate credentials for independent trust domains. Machine, provider, model
+and external chat labels are reports, not authentication factors.
+
+GET `/api/limits?sessionId=OWNED_SESSION_ID` returns effective message limits,
+UTC day/resetAt, own principal usage, optional own session usage, workspace
+usage and retained storage. `MESSAGE_LIMITS_JSON` accepts positive integer
+`sessionDaily`, `principalDaily`, `workspaceDaily`, `retainedMessages` and
+`retainedBodyBytes`. Daily limits must increase from session to principal to
+workspace. Defaults are 500/3000/5000 daily and 100000/134217728 retained
+messages/body bytes. Storage includes all review states and is separate from
+rate accounting. The body-byte budget excludes index/other-table storage;
+operators must monitor actual D1 storage and reads/writes before raising it.
+Daily errors are HTTP 429 with `MESSAGE_SESSION_DAILY_LIMIT`,
+`MESSAGE_PRINCIPAL_DAILY_LIMIT` or `MESSAGE_WORKSPACE_DAILY_LIMIT`, plus
+Retry-After to midnight UTC. Storage refusal is 503 `MESSAGE_STORAGE_LIMIT`.
+Exact idempotent retries remain valid at capacity and never increment counters.
+
+`SESSION_LIMITS_JSON` accepts `activePrincipal`, `activeWorkspace`,
+`retainedPrincipal` and `retainedWorkspace`. Defaults are 500/2000/10000/100000.
+Active workspace capacity cannot exceed the complete 2000-session discovery
+bound. Owned sender discovery follows bounded offset pages of at most 200.
+Archive only reported DONE registrations after their claims are released;
+archival preserves retained history and never completes a native goal.
+
+PATCH `/api/principals/:id` is owner-only and accepts `name` and/or `account`
+for display labels. It changes no token, invitation scope, role or historical
+principal IDs; owner and service identities are immutable.
+
+POST `/api/sessions/:source/merge` accepts `{targetSessionId}`. The caller must
+own both records, or be the owner; both must belong to the same principal,
+project, machine and exact external chat. The target must have its app namespace.
+A legacy bare Codex UUID can pair only with `codex:<that UUID>`; arbitrary IDs
+remain case-sensitive. Similar titles are never proof of duplicate identity.
+The newer reported task/status/checkpoint wins, with both original snapshots
+retained. Claims and an uncontested observer mapping transfer atomically. Two
+observer bindings or too many combined claims refuse the merge. No native task
+is completed, paused or resumed by this operation.
+
+Merged source IDs remain aliases. Registration, writes, acknowledgments and
+reply validation resolve the canonical session. Inbox/conversation/attribution
+reads include its lineage while preserving original message/session/segment
+IDs, payload hashes, deliveries and cursors. Original attribution intervals
+remain partitioned by their original session, and new switches require the
+latest lineage predecessor. A merge cannot replenish a chat's daily quota.
+New registration reuses a matching legacy/namespaced Codex UUID instead of
+creating another duplicate. Do not restart clients; old cached IDs keep working.

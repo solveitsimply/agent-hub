@@ -315,3 +315,53 @@ select, .filters select { appearance: none; padding-right: 36px; background-imag
 .refresh-note { color: var(--muted); font-size: 11px; margin: 0; }
 
 .detail-columns.claims-only { grid-template-columns: 1fr; }
+
+/* Conversations open in one session-scoped drawer; the board stays in place. */
+.session-search { display: grid; gap: 6px; margin-bottom: 16px; }
+.session-search .form-note { margin: 0; }
+.session-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.session-actions .session-copy { margin-left: auto; }
+.inbox-links { display: grid; gap: 10px; margin-top: 16px; }
+.message-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(760px, 100vw); height: 100dvh; max-width: 100vw; max-height: 100dvh; padding: 0; border: 0; border-left: 1px solid var(--line); background: var(--canvas); color: var(--text); box-shadow: var(--shadow); overflow: hidden; }
+.message-drawer[open] { display: flex; flex-direction: column; }
+.message-drawer::backdrop { background: rgb(0 0 0 / 55%); }
+body:has(.message-drawer[open]) { overflow: hidden; }
+.drawer-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 24px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.drawer-header h2 { overflow-wrap: anywhere; font-size: 21px; }
+.drawer-header .eyebrow { margin-bottom: 6px; }
+.drawer-header button { flex-shrink: 0; }
+.drawer-content { min-height: 0; overflow: auto; padding: 24px; }
+.drawer-content > .muted { margin-top: 0; overflow-wrap: anywhere; }
+.message-drawer .message-form { margin: 16px 0 24px; padding: 16px; border: 1px solid var(--line); }
+.compose-recipient { overflow-wrap: anywhere; margin: 4px 0 8px; color: var(--accent); font-weight: 700; }
+.message-drawer .message-form textarea, .message-drawer .message-form select { font-size: 14px; }
+.conversation-panel { margin-top: 24px; }
+.message-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.message-search { grid-column: 1 / -1; }
+.message-drawer .message-list { max-height: none; overflow: visible; }
+.message-drawer .message-body-text { font-size: 14px; line-height: 1.65; }
+.session-details-wrap { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 16px; }
+.session-details-wrap > summary { cursor: pointer; font-weight: 700; padding: 8px 0; }
+.session-details-wrap .detail-panel { margin-top: 12px; }
+@media (max-width: 760px) {
+  .drawer-header, .drawer-content { padding: 16px; }
+  .session-actions .session-copy { margin-left: 0; }
+  .session-actions .button { min-height: 40px; }
+  .message-drawer .detail-columns, .message-drawer .detail-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-color-scheme: light) {
+  .kind-handoff { color: #315cad; }
+}
+@media (max-width: 420px) {
+  .message-top { flex-wrap: wrap; }
+  .message-top time { margin-left: auto; }
+}
+
+@media (max-width: 760px) {
+  .workspace-grid > .main-column, .workspace-grid > .side-column { display: contents; }
+  .inbox-navigation { order: -1; }
+  .inbox-links { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inbox-links .button { min-height: 44px; white-space: normal; }
+  .message-drawer .message-form textarea, .message-drawer .message-form select { font-size: 16px; }
+}
