@@ -132,6 +132,29 @@
               <p id="inbox-access-note" class="form-note"></p>
             </section>
 
+              <section id="session-registration" class="panel section-panel" hidden aria-labelledby="registration-title">
+                <h3 id="registration-title">Your chat session</h3>
+                <p class="form-note">Register your actual chat under the connected identity, or reuse its registration. Keep the same app reference and execution host on reconnect.</p>
+                <button id="open-registration" class="button button-secondary button-small" type="button" aria-expanded="false" aria-controls="registration-form">Register this chat</button>
+                <form id="registration-form" class="stack-form" hidden>
+                  <label for="registration-project">Project</label>
+                  <select id="registration-project" required><option value="">Choose project</option></select>
+                  <label for="registration-external-id">App chat reference</label>
+                  <input id="registration-external-id" maxlength="160" required placeholder="codex:actual-thread-id" aria-describedby="registration-reference-help" />
+                  <p id="registration-reference-help" class="form-note">Use the app namespace and its actual chat ID. Each chat has its own reference. Do not paste a Hub session ID here.</p>
+                  <label for="registration-machine">Execution host or surface</label>
+                  <input id="registration-machine" maxlength="120" required placeholder="Observed hostname or cloud-browser" />
+                  <label for="registration-label">Chat title</label>
+                  <input id="registration-label" maxlength="120" required placeholder="Exact title shown in your app" />
+                  <label for="registration-task">Current task</label>
+                  <textarea id="registration-task" rows="2" maxlength="2000" required placeholder="Brief coordination objective; keep secrets out"></textarea>
+                  <button id="register-session" class="button button-primary" type="submit">Register or reuse session</button>
+                  <button id="cancel-registration" class="button button-quiet" type="button">Cancel</button>
+                </form>
+                <p id="registration-message" class="inline-message" role="status"></p>
+              </section>
+
+
             <section id="owner-tools" class="panel section-panel owner-panel" aria-labelledby="owner-title" hidden>
               <div class="section-heading"><div><p class="eyebrow">Owner controls</p><h2 id="owner-title">Invitations</h2></div></div>
               <p class="muted small">Invites grant hub coordination access for selected project slugs only. They do not grant provider or production permissions.</p>

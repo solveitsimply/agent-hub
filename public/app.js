@@ -13,6 +13,8 @@
     token: null,
     principal: null,
     sessions: [],
+    preferredSenderId: '',
+    registering: false,
     sessionFilterOptions: { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] },
     sessionSummary: null,
     sessionTotal: 0,
@@ -75,6 +77,9 @@
     loadOlder: $('load-older-button'), messageForm: $('message-form'),
     fromSessionWrap: $('from-session-wrap'), fromSession: $('from-session'), messageKind: $('message-kind'),
     ownerRelayFields: $('owner-relay-fields'), ownerRelaySource: $('owner-relay-source'), ownerRelayConfirmed: $('owner-relay-confirmed'), composeTitle: $('compose-title'), messageBodyLabel: $('message-body-label'),
+    registration: $('session-registration'), registrationForm: $('registration-form'), openRegistration: $('open-registration'),
+    registrationProject: $('registration-project'), registrationExternalId: $('registration-external-id'), registrationMachine: $('registration-machine'),
+    registrationLabel: $('registration-label'), registrationTask: $('registration-task'), registerSession: $('register-session'), cancelRegistration: $('cancel-registration'), registrationMessage: $('registration-message'),
     messageBody: $('message-body'), sendMessage: $('send-message'), composeAs: $('compose-as'), replyContext: $('reply-context'),
     ownerTools: $('owner-tools'), inviteForm: $('invite-form'), inviteMessage: $('invite-message'), principalList: $('principal-list'),
     connectionHistory: $('connection-history'), connectionList: $('connection-list'), connectionStatus: $('connection-history-status'), refreshConnections: $('refresh-connections'), olderConnections: $('older-connections'),
@@ -206,6 +211,13 @@
     renderAttributionFilter(el.machineFilter, state.sessionFilterOptions.machines, 'All machines');
     renderAttributionFilter(el.environmentFilter, state.sessionFilterOptions.environments, 'All environments');
     renderBranchFilter();
+    const registrationProject = el.registrationProject.value;
+    clear(el.registrationProject);
+    option(el.registrationProject, '', 'Choose project');
+    for (const project of state.principal?.projects ?? []) if (project !== '*') option(el.registrationProject, project, project);
+    if ([...el.registrationProject.options].some(item => item.value === registrationProject)) el.registrationProject.value = registrationProject;
+    else if (el.registrationProject.options.length === 2) el.registrationProject.selectedIndex = 1;
+    el.registration.hidden = isOwner();
   }
 
   function renderAttributionFilter(select, values, allLabel) {
@@ -951,7 +963,8 @@
         clear(el.fromSession);
         option(el.fromSession, '', 'Choose your sending session');
         for (const sender of state.senderSessions) option(el.fromSession, sender.id, `${sender.label || sender.id} · ${sender.project}`);
-        if (state.senderSessions.length === 1) el.fromSession.value = state.senderSessions[0].id;
+        if (state.senderSessions.some(item => item.id === state.preferredSenderId)) el.fromSession.value = state.preferredSenderId;
+        else if (state.senderSessions.length === 1) el.fromSession.value = state.senderSessions[0].id;
         el.sendButton.disabled = state.sending || !state.senderSessions.length;
         if (!state.senderSessions.length) el.sendMessage.textContent = 'No eligible sending session for this account. Register a session in the recipient’s project first.';
         updateSenderProject();
@@ -1080,6 +1093,14 @@
     state.token = null;
     state.principal = null;
     state.sessions = [];
+    state.preferredSenderId = '';
+    state.registering = false;
+    el.registrationForm.reset();
+    el.registrationForm.hidden = true;
+    el.registration.hidden = true;
+    el.openRegistration.setAttribute('aria-expanded', 'false');
+    el.registerSession.disabled = false;
+    el.registrationMessage.textContent = '';
     state.sessionFilterOptions = { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] };
     state.sessionTotal = 0;
     state.sessionLimit = 200;
@@ -1161,6 +1182,52 @@
   });
 
   el.logout.addEventListener('click', disconnect);
+  el.openRegistration.addEventListener('click', () => {
+    el.registrationForm.hidden = false;
+    el.openRegistration.setAttribute('aria-expanded', 'true');
+    el.registrationExternalId.focus();
+  });
+  el.cancelRegistration.addEventListener('click', () => {
+    el.registrationForm.hidden = true;
+    el.openRegistration.setAttribute('aria-expanded', 'false');
+    el.openRegistration.focus();
+  });
+  el.registrationForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (isOwner() || !state.principal || state.registering) return;
+    const generation = state.generation;
+    const body = {
+      externalId: el.registrationExternalId.value.trim(), machine: el.registrationMachine.value.trim(),
+      label: el.registrationLabel.value.trim(), project: el.registrationProject.value,
+      task: el.registrationTask.value.trim(), status: 'RUNNING',
+    };
+    if (!body.externalId || !body.machine || !body.label || !body.task || !state.principal.projects.includes(body.project)) {
+      setText(el.registrationMessage, 'Enter the actual chat reference, host, title, task and an enrolled project.');
+      return;
+    }
+    state.registering = true;
+    el.registerSession.disabled = true;
+    setText(el.registrationMessage, 'Registering your chat…');
+    try {
+      const payload = await request('/sessions', { method: 'POST', body: JSON.stringify(body) });
+      if (generation !== state.generation) return;
+      const session = payload.session;
+      if (!ownsSession(session) || session.externalId !== body.externalId || session.project !== body.project) throw new Error('The returned session does not match this identity and chat.');
+      if (session.archivedAt) {
+        if (state.preferredSenderId === session.id) state.preferredSenderId = '';
+        throw new Error('This chat registration is archived. Use the actual reference of a new chat for new work.');
+      }
+      state.preferredSenderId = session.id;
+      setText(el.registrationMessage, `Registered session: ${session.label} (${session.id}). Identity: ${session.principalName}. App reference: ${session.externalId}. Status: ${STATUS_LABELS[session.status] || session.status}.`);
+      el.registrationForm.hidden = true;
+      el.openRegistration.setAttribute('aria-expanded', 'false');
+      await refresh({ quiet: true });
+    } catch (error) {
+      if (!(error instanceof StaleRequestError) && generation === state.generation) setText(el.registrationMessage, error.message || 'Could not register your chat.');
+    } finally {
+      if (generation === state.generation) { state.registering = false; el.registerSession.disabled = false; }
+    }
+  });
   el.copyAgentSetup.addEventListener('click', async () => {
     el.copyAgentSetup.disabled = true;
     const generation = state.generation;
