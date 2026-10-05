@@ -34,6 +34,14 @@ const messagingAuthority=principal=>principal.capabilitySchema
   ? `EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1 AND ${principal.profile==='coordinator'?"access_profile='observer' AND coordinator_access=1":"access_profile='agent' AND coordinator_access=0"})`
   : ACTIVE_PRINCIPAL;
 const dayAgo=()=>new Date(Date.now()-86400000).toISOString();
+const configuredMessageLimit=(environment,name,defaultValue,workspaceMaximum)=>{
+  const value=environment[name];
+  if(value===undefined)return defaultValue;
+  if(typeof value!=='string'||! /^(?:0|[1-9]\d*)$/.test(value))fail(503,'NOT_CONFIGURED',`${name} must be a positive whole number.`);
+  const parsed=Number(value);
+  if(!Number.isSafeInteger(parsed)||parsed<1)fail(503,'NOT_CONFIGURED',`${name} must be a positive safe integer.`);
+  return Math.min(parsed,workspaceMaximum);
+};
 async function requireCurrent(db,principal){
   const current=await db.prepare('SELECT * FROM principals WHERE id=? AND active=1').bind(principal.id).first();
   if(!current)fail(401,'UNAUTHORIZED','This invitation has been revoked.');
@@ -282,6 +290,8 @@ async function api(request,env){
     await requireCurrent(db,principal);const current=await sessionById(db,row.id,principal,true);requireActive(current);return json({session:sessionView(current,principal,aliases)});
   }
   if(path==='/api/messages'&&method==='POST'){
+    const retainedMessageCap=configuredMessageLimit(env,'HUB_MESSAGE_CAP_PER_PRINCIPAL_RETAINED',1000,10000);
+    const rollingMessageCap=configuredMessageLimit(env,'HUB_MESSAGE_CAP_PER_PRINCIPAL_24H',500,5000);
     const body=await readBody();checkKeys(body,['fromSessionId','toSessionId','project','kind','body','idempotencyKey','replyTo','ownerRelay']);const project=slug(body.project);requireProject(principal,project);
     if(!KINDS.has(body.kind))fail(422,'INVALID_KIND','Select a supported message kind.');
     const from=body.fromSessionId?await sessionById(db,body.fromSessionId,principal,true,{custodyOnly:true}):null;if(!from&&principal.role!=='owner')fail(403,'SENDER_REQUIRED','An agent must send from its own registered session.');
@@ -316,7 +326,7 @@ async function api(request,env){
     const relayColumn=principal.capabilitySchema?',owner_relay_reference':'';
     const relayPlaceholder=principal.capabilitySchema?',?':'';
     await db.batch([
-      db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,reply_to,created_at,review_state,reviewed_at${relayColumn}) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${relayPlaceholder} WHERE ${sendAuthority} AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM messages q WHERE q.id=? AND q.project=? AND q.kind='QUESTION' AND q.to_principal_id='owner' AND q.to_session_id IS NULL AND q.from_session_id=? AND q.from_principal_id=? AND q.review_state!='REJECTED')) AND (SELECT COUNT(*)<10000 AND COUNT(*) FILTER (WHERE from_principal_id=?)<1000 AND COUNT(*) FILTER (WHERE created_at>=?)<5000 AND COUNT(*) FILTER (WHERE from_principal_id=? AND created_at>=?)<500 FROM messages) ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(principal.id,recipient,from?.id??null,to?.id??null,project,body.kind,text,key,payloadHash,replyTo,date,'APPROVED',null,...(principal.capabilitySchema?[relayReference]:[]),principal.id,recipient,principal.id,project,recipient,project,from?.id??null,from?.id??null,principal.id,project,to?.id??null,to?.id??null,recipient,project,relayReference,replyTo,project,to?.id??null,recipient,principal.id,dayAgo(),principal.id,dayAgo()),
+      db.prepare(`INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,reply_to,created_at,review_state,reviewed_at${relayColumn}) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${relayPlaceholder} WHERE ${sendAuthority} AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND EXISTS(SELECT 1 FROM principals p WHERE p.id=? AND (p.role='owner' OR EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=?))) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND project=? AND archived_at IS NULL)) AND (? IS NULL OR EXISTS(SELECT 1 FROM messages q WHERE q.id=? AND q.project=? AND q.kind='QUESTION' AND q.to_principal_id='owner' AND q.to_session_id IS NULL AND q.from_session_id=? AND q.from_principal_id=? AND q.review_state!='REJECTED')) AND (SELECT COUNT(*)<10000 AND COUNT(*) FILTER (WHERE from_principal_id=?)<? AND COUNT(*) FILTER (WHERE created_at>=?)<5000 AND COUNT(*) FILTER (WHERE from_principal_id=? AND created_at>=?)<? FROM messages) ON CONFLICT(from_principal_id,idempotency_key) DO NOTHING`).bind(principal.id,recipient,from?.id??null,to?.id??null,project,body.kind,text,key,payloadHash,replyTo,date,'APPROVED',null,...(principal.capabilitySchema?[relayReference]:[]),principal.id,recipient,principal.id,project,recipient,project,from?.id??null,from?.id??null,principal.id,project,to?.id??null,to?.id??null,recipient,project,relayReference,replyTo,project,to?.id??null,recipient,principal.id,retainedMessageCap,dayAgo(),principal.id,dayAgo(),rollingMessageCap),
       db.prepare(`INSERT INTO message_deliveries(message_id) SELECT id FROM messages WHERE from_principal_id=? AND idempotency_key=? AND review_state='APPROVED' AND to_session_id IS NOT NULL AND ${sendAuthority} ON CONFLICT(message_id) DO NOTHING`).bind(principal.id,key,principal.id),
       db.prepare(`UPDATE messages SET delivery_id=(SELECT id FROM message_deliveries WHERE message_id=messages.id) WHERE from_principal_id=? AND idempotency_key=? AND review_state='APPROVED' AND to_session_id IS NOT NULL AND ${sendAuthority}`).bind(principal.id,key,principal.id),
     ]);
