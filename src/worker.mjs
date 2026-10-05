@@ -304,6 +304,12 @@ async function api(request,env){
     const body=await readBody(),parsed=parseAttribution(body,fail);
     const attributionScope=await sessionMessageScope(db,session.id,'session_id');
     const payloadHash=await digest(JSON.stringify({metadata:parsed.metadata,previousSegmentId:parsed.previousSegmentId}));
+    // An alias may still retry an immutable switch recorded before its merge.
+    // Prefer that original registration's key before the canonical write scope.
+    if(attributionMatch[1]!==session.id){
+      const original=await db.prepare('SELECT * FROM (SELECT a.*,COALESCE(LEAD(started_at) OVER (ORDER BY a.id),s.archived_at) AS ended_at FROM session_attribution_segments a JOIN sessions s ON s.id=a.session_id WHERE a.session_id=? AND a.principal_id=?) WHERE idempotency_key=?').bind(attributionMatch[1],principal.id,parsed.idempotencyKey).first();
+      if(original){await requireCurrent(db,principal);if(original.payload_hash!==payloadHash)fail(409,'IDEMPOTENCY_CONFLICT','That idempotency key already records different attribution.');return json({segment:segmentView(original,principal)},201);}
+    }
     await db.prepare(`INSERT INTO session_attribution_segments(session_id,principal_id,idempotency_key,payload_hash,metadata_json,started_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM session_attribution_segments WHERE principal_id=?)<10000 AND (SELECT COUNT(*) FROM session_attribution_segments)<100000 AND EXISTS(SELECT 1 FROM sessions WHERE id=? AND principal_id=? AND archived_at IS NULL) AND (SELECT MAX(id) FROM session_attribution_segments WHERE ${attributionScope.sql}) IS ? AND (SELECT COUNT(*) FROM session_attribution_segments WHERE ${attributionScope.sql})<10000 ON CONFLICT(session_id,idempotency_key) DO NOTHING`).bind(session.id,principal.id,parsed.idempotencyKey,payloadHash,JSON.stringify(parsed.metadata),now(),principal.id,principal.id,session.id,principal.id,...attributionScope.values,parsed.previousSegmentId,...attributionScope.values).run();
     await requireCurrent(db,principal);
     const row=await db.prepare('SELECT * FROM (SELECT *,LEAD(started_at) OVER (ORDER BY id) AS ended_at FROM session_attribution_segments WHERE session_id=?) WHERE idempotency_key=?').bind(session.id,parsed.idempotencyKey).first();

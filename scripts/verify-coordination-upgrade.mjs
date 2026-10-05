@@ -34,7 +34,10 @@ try{
   assert.equal((await call(peer.body.token,'/api/messages',payload)).status,403);
   const claimKey='fixture/custody/'+external;
   assert.equal((await call(owner,'/api/ownership/claim',{sessionId:sourceId,resourceKey:claimKey})).status,200);
+  const switchBody={provider:'Synthetic',client:'Synthetic native client',previousSegmentId:null,idempotencyKey:crypto.randomUUID()};
+  const recordedSwitch=await call(owner,'/api/sessions/'+sourceId+'/attribution',switchBody);assert.equal(recordedSwitch.status,201);
   const merge=await call(owner,'/api/sessions/'+sourceId+'/merge',{targetSessionId:targetId});assert.equal(merge.status,200);assert.equal(merge.body.session.status,'RUNNING');
+  const switchRetry=await call(owner,'/api/sessions/'+sourceId+'/attribution',switchBody);assert.equal(switchRetry.status,201);assert.equal(switchRetry.body.segment.id,recordedSwitch.body.segment.id);assert.equal(switchRetry.body.segment.sessionId,sourceId);
   const retry=await call(owner,'/api/messages',payload);assert.equal(retry.status,201);assert.equal(retry.body.message.payloadHash,sent.body.message.payloadHash);assert.equal(retry.body.message.deliveryCursor,sent.body.message.deliveryCursor);
   assert.equal((await call(owner,'/api/sessions/'+sourceId+'/heartbeat',{})).body.session.id,targetId);
   const claims=await call(owner,'/api/ownership?project=capacity-fixture&resourceKey='+encodeURIComponent(claimKey));assert.equal(claims.body.ownership[0].ownerSessionId,targetId);
@@ -47,6 +50,6 @@ try{
   const limits=await call(owner,'/api/limits?sessionId='+targetId);assert.equal(limits.body.usage.session,500);
   assert.equal((await call(owner,'/api/principals/'+peer.body.principal.id,{name:'Synthetic development account'},'PATCH')).status,200);
   assert.equal((await call(peer.body.token,'/api/me')).body.principal.name,'Synthetic development account');
-  const receipt={observedAt:new Date().toISOString(),runtime:'Cloudflare workerd + local D1',scope:'Synthetic loopback only',checks:['migration 0010 triggers','native per-chat rate limit and Retry-After','quota counters include pending records','merge preserves payload hashes/delivery cursors','old-ID retries at capacity','alias inbox/heartbeat','ownership transfer','cross-principal sender refusal','owner-only display rename']};
+  const receipt={observedAt:new Date().toISOString(),runtime:'Cloudflare workerd + local D1',scope:'Synthetic loopback only',checks:['migration 0010 triggers','native per-chat rate limit and Retry-After','quota counters include pending records','merge preserves payload hashes/delivery cursors','old-ID retries at capacity','old attribution key retry preserves original segment','alias inbox/heartbeat','ownership transfer','cross-principal sender refusal','owner-only display rename']};
   await mkdir(new URL('../.evidence/',import.meta.url),{recursive:true});await writeFile(new URL('../.evidence/coordination-native.json',import.meta.url),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(receipt));
 }finally{await rm(temporary,{recursive:true,force:true});}
