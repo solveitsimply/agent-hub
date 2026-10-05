@@ -16,6 +16,28 @@ async function setup(t){const f=fixture(t),coordinator=await invite(f,'delegate'
   const question=await send(f,asker,asking,null);return {f,coordinator,asker,other,observer,foreign,own,asking,peer,viewing,outside,question};}
 function relay(x,changes={}){return {fromSessionId:x.own.id,toSessionId:x.asking.id,project:'alpha',kind:'ANSWER',body:'Yes, use the option I selected.\nKeep the original wording.',idempotencyKey:crypto.randomUUID(),replyTo:x.question.id,ownerRelay:{ownerProvided:true,sourceReference:'Human chat synthetic-turn-42'},...changes};}
 function custody(f,id){return f.DB.database.prepare('SELECT to_principal_id,to_session_id,acknowledged_at,review_state,delivery_id FROM messages WHERE id=?').get(id);}
+
+test('browser coordinator registration binds the actual chat to its identity and safely reuses retries',async t=>{
+  const f=fixture(t),legacy=await invite(f,'legacy'),delegate=await invite(f,'browser-delegate','coordinator');
+  const body={externalId:'codex:synthetic-parent-chat',machine:'cloud-browser',label:'Exact parent chat title',project:'alpha',task:'Coordinate enrolled project sessions',status:'RUNNING'};
+  const old=(await f.call(legacy.token,'/api/sessions',body)).body.session;
+  const registered=await f.call(delegate.token,'/api/sessions',body);assert.equal(registered.status,201);
+  const owned=registered.body.session;assert.notEqual(owned.id,old.id);assert.equal(owned.principalId,delegate.principal.id);assert.equal(owned.externalId,body.externalId);
+  const retry=await f.call(delegate.token,'/api/sessions',{...body,label:'Must not rename by retry',task:'Must not overwrite',status:'DONE'});
+  assert.equal(retry.status,200);assert.equal(retry.body.session.id,owned.id);assert.equal(retry.body.session.label,body.label);assert.equal(retry.body.session.task,body.task);assert.equal(retry.body.session.status,'RUNNING');
+  assert.equal((await f.call(delegate.token,'/api/sessions',{...body,machine:'different-host'})).status,409);
+  assert.equal((await f.call(delegate.token,'/api/sessions',{...body,project:'beta'})).status,403);
+  assert.equal((await f.call(delegate.token,'/api/sessions',{...body,principalId:legacy.principal.id})).status,422);
+  assert.equal((await f.call(delegate.token,'/api/messages',{fromSessionId:old.id,project:'alpha',kind:'QUESTION',body:'Cannot use another principal sender',idempotencyKey:'wrong-sender'})).status,403);
+  assert.equal((await f.call(delegate.token,'/api/messages',{fromSessionId:owned.id,project:'alpha',kind:'QUESTION',body:'Owned browser sender works',idempotencyKey:'owned-sender'})).status,201);
+  const child=await f.call(delegate.token,'/api/sessions',{...body,externalId:'codex:synthetic-engineering-child'});assert.equal(child.status,201);assert.notEqual(child.body.session.id,owned.id);
+  assert.equal(f.DB.database.prepare('SELECT principal_id FROM sessions WHERE id=?').get(old.id).principal_id,legacy.principal.id);
+  assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM sessions WHERE principal_id=?').get(delegate.principal.id).n,2);
+  assert.equal((await f.call(delegate.token,'/api/sessions/'+owned.id,{status:'DONE'},'PATCH')).status,200);
+  assert.equal((await f.call(delegate.token,'/api/sessions/'+owned.id+'/archive',{})).status,200);
+  const archivedRetry=await f.call(delegate.token,'/api/sessions',body);assert.equal(archivedRetry.status,200);assert.equal(archivedRetry.body.session.id,owned.id);assert.ok(archivedRetry.body.session.archivedAt);
+  assert.equal((await f.call(delegate.token,'/api/messages',{fromSessionId:owned.id,project:'alpha',kind:'QUESTION',body:'Archived sender is unavailable',idempotencyKey:'archived-sender'})).status,409);
+});
 function denied(result,label){assert.ok(result.status>=400&&result.status<500,label+': '+JSON.stringify(result));}
 
 test('owner changes a principal profile without replacing its token, identity, sessions or project scopes',async t=>{
