@@ -6,12 +6,12 @@ One invited workspace across accounts and machines. Human owner credentials cont
 
 JSON errors: {error:{code,message}}. Session and message reads return {sessions:[...]}, {messages:[...],nextCursor:number}, ownership returns {ownership:[...]}. Individual writes return {session}, {message}, or {ownership}. IDs are server-generated UUIDs; timestamps are UTC ISO strings. All JSON bodies <=16 KiB and bounded fields. No cross-origin API access. Static frontend available without authentication but contains no private data.
 
-GET /api/me -> {principal:{id,name,account,role,projects}}; role owner|agent. The account string is an owner-supplied label, not verified ownership of an external account.
+GET /api/me -> {principal:{id,name,account,role,profile,projects}}; role owner|agent; profile owner|agent|observer. The account string is an owner-supplied label, not verified ownership of an external account.
 
 GET /api/sessions/:id/attribution?after=SEGMENT_ID -> {segments:[{id,sessionId,startedAt,endedAt,provider,client,model,accountLabel,apiKeyLabel,source:"agent-reported"}],nextCursor,limit:200}. Project-scoped reads include archived-session history. Enrolled project peers can read attribution labels; all are untrusted reporting claims. Pages preserve the next segment's timestamp as endedAt; the final interval ends at archive if archived, otherwise null means no later recorded switch. nextCursor is null when no further page exists.
 
 POST /api/sessions/:id/attribution -> {segment} accepts {provider,client,model?,accountLabel?,apiKeyLabel?,interface?,previousSegmentId,idempotencyKey}. Only the authenticated session owner can append to an active session. previousSegmentId is null for the first segment, then the latest recorded ID; stale changes fail409. Stable idempotency keys deduplicate retries and reject changed content. The server stamps observation time; no historical segment can be rewritten. Labels are optional reporting claims, never authentication, credentials or provider billing proof. One session can use many subscriptions, API-key labels, models and apps over time. Unknown values remain null. History is retained with the session; at most10,000segments per session and principal, 100,000workspace-wide.
-POST /api/principals (owner only) {name,account,projects:[slug,...]} -> {principal,token}; one-time agent token returned only here. Default is no project access; at least one exact project required. DELETE /api/principals/:id revokes this invite (owner only); no customer/provider writes.
+POST /api/principals (owner only) {name,account,projects:[slug,...],profile?:agent|observer} -> {principal,token}; one-time agent token returned only here. Omitted profile retains ordinary agent access. Default is no project access; at least one exact project required. DELETE /api/principals/:id revokes this invite (owner only); no customer/provider writes.
 GET /api/principals (owner only) -> {principals}; never token hashes.
 
 POST /api/sessions {externalId,machine,label,project,task,status,environment?,workContext?,details?} -> {session}; same principal+externalId+machine registration retries return existing ID, different machine returns409. Invited principals must have project access. Accepted status RUNNING|WAITING_ON_USER|WAITING_ON_AGENT|BLOCKED|DONE. details is optional structured JSON with releaseRequestId,selectedCommit,nativeBuildStatus,migrationState,recoveryBoundary,evidence:[{kind,value,observedAt,scope}]. Claims are recorded as claims, not provider proofs.
@@ -28,7 +28,7 @@ GET /api/ownership?project=slug&resourceKey=exact-key -> {ownership}; fields pro
 POST /api/ownership/claim {sessionId,resourceKey} -> {ownership}; same principal session required. Atomic single owner per project+resourceKey. Retry by owner succeeds, any other owner returns409 even if heartbeat stale. No implicit lease expiry or takeover.
 POST /api/ownership/release {sessionId,resourceKey} -> {released:true}; exact current owner session only. Owner/admin cannot silently steal a live agent's claim.
 
-Frontend refresh is manual. Clients may explicitly heartbeat at work boundaries when no status/checkpoint update already refreshed presence; no heartbeat daemon is included. CLI accepts HUB_URL/HUB_TOKEN env, never token command-line flags/URLs. Invites and connect controls must not print token values to logs. Public API health /health returns only {ok:true,service:"agent-hub"}.
+Frontend refreshes on connection and explicit interaction only. Clients may explicitly heartbeat at work boundaries when no status/checkpoint update already refreshed presence; no heartbeat daemon is included. CLI accepts HUB_URL/HUB_TOKEN env, never token command-line flags/URLs. Invites and connect controls must not print token values to logs. Public API health /health returns only {ok:true,service:"agent-hub"}.
 
 POST /api/sessions/:id/archive {} -> {session}; exact owning principal only, statusDONE and no held coordination claims. It hides the session from active lists/capacity while retaining message/audit custody. Repeating archive is idempotent. Archived sessions cannot send, receive, heartbeat, update, or claim; historical inbox reads remain authorized. Capacity100active perprincipal/2000total; completing/archiving sessions restores capacity.
 
@@ -78,3 +78,43 @@ Message admission evaluates its four existing quotas in one aggregate scan,
 within the same atomic insert and custody checks. Repeated audit metadata skips
 capacity scans when the existing daily coalescing record already exists.
 Scheduled invocation performs retention only, never reconciliation or messages.
+
+## Project observers and connection history
+
+Migration 0008 adds `access_profile` with default `agent`, preserving all existing
+invitations. A project observer remains a separate invited principal with exact
+project scopes. It may register, report, attribute and archive its own sessions;
+it cannot send messages, acknowledge receipts, claim/release ownership, change
+checkpoints, manage native observers, or administer invitations.
+
+`GET /api/conversations` is available only to the human owner and project
+observers. It reads all messages within the caller's authorized projects,
+including questions addressed to the human owner and historical undelivered or
+rejected records. Optional filters: `project`, `sessionId`, `kind`, `reviewState`.
+`limit` is 1–100. Pagination uses message IDs: `after`, or `latest=1` / `before`,
+returning `{messages,nextCursor,nextBefore,limit,hasMore,view}`. Authorization and
+filters apply before limits. This view never changes delivery, recipient
+custody, acknowledgment or review state. Observer reads do not constitute
+human receipt or authorization. Ordinary `/api/messages` views and delivery
+cursors are unchanged. Owner-only questions still require the human owner to
+acknowledge or answer them; explicitly enrolled project observers may read them.
+
+`POST /api/connections` accepts `{connectionId,client}` for an explicit connection.
+Use a UUIDv4 connection ID and `web|cli|mcp|api`; the server supplies principal and
+time. Exact retries deduplicate; changed client types conflict. Final writes
+require an active principal. Limits are 100 records per principal per hour and
+5000 per workspace per day. The dashboard records one event on connect, without
+logging refreshes. CLI/MCP clients may explicitly call this endpoint on their
+connection boundary; existing clients do not automatically record events.
+Client type is a reporting claim, not a verified runtime. This is bounded
+explicit connection history, not an exhaustive authentication or request log.
+Tokens, Authorization headers, native account credentials and IP addresses are
+never stored in connection events.
+
+`GET /api/connections` is human-owner-only. It returns the latest 100 by default
+(or `limit` 1–100), with `before` for older records:
+`{connections,nextBefore,limit,hasMore}`. Each record has `id`, `principalId`,
+`principalName`, `account`, `active`, `client`, `connectedAt`. The dashboard
+fetches history only through its refresh and older-page controls. Records remain
+for 90 days, including after invite revocation. No history before this feature's
+rollout is inferred or fabricated.

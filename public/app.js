@@ -19,6 +19,10 @@
     sessionLimit: 200,
     messages: [],
     principals: [],
+    connections: [],
+    connectionBefore: null,
+    connectionLoading: false,
+    connectionGeneration: 0,
     ownership: [],
     selectedSessionId: '',
     attribution: { sessionId: '', segments: [], cursor: null, hasMore: false, loading: false, error: '' },
@@ -55,6 +59,7 @@
     fromSessionWrap: $('from-session-wrap'), fromSession: $('from-session'), toSession: $('to-session'), messageKind: $('message-kind'),
     messageBody: $('message-body'), sendMessage: $('send-message'), composeAs: $('compose-as'), replyContext: $('reply-context'),
     ownerTools: $('owner-tools'), inviteForm: $('invite-form'), inviteMessage: $('invite-message'), principalList: $('principal-list'),
+    connectionHistory: $('connection-history'), connectionList: $('connection-list'), connectionStatus: $('connection-history-status'), refreshConnections: $('refresh-connections'), olderConnections: $('older-connections'),
     tokenPanel: $('one-time-token'), tokenValue: $('invite-token-value'), dismissToken: $('dismiss-token'), toast: $('toast'),
   };
 
@@ -69,6 +74,8 @@
   const setText = (target, value) => { target.textContent = value == null || value === '' ? '—' : String(value); };
   const clear = (target) => target.replaceChildren();
   const isOwner = () => state.principal?.role === 'owner';
+  const isObserver = () => state.principal?.profile === 'observer';
+  const conversationView = () => isOwner() || isObserver();
   const selectedSession = () => state.sessions.find((session) => session.id === state.selectedSessionId) ?? null;
   const visibleProject = () => el.projectFilter.value;
   const projectList = () => [...new Set([
@@ -555,7 +562,7 @@
     clear(el.claims);
     const session = selectedSession();
     if (!session) return;
-    const canManage = ownsSession(session);
+    const canManage = ownsSession(session) && !isObserver();
     el.claimForm.hidden = !canManage;
     const projectClaims = state.ownership.filter((claim) => claim.project === session.project);
     if (!projectClaims.length) el.claims.append(node('p', 'muted small', 'No resources are claimed in this project.'));
@@ -575,7 +582,7 @@
   }
 
   function canAcknowledge(message) {
-    if (message.acknowledgedAt) return false;
+    if (isObserver() || message.acknowledgedAt) return false;
     if (isOwner()) return message.toSessionId == null && message.kind === 'QUESTION' && message.fromSessionId != null;
     return Boolean(message.reviewState === 'APPROVED' && message.toSessionId && message.toPrincipalId === state.principal?.id);
   }
@@ -586,11 +593,11 @@
 
   function renderMessages() {
     clear(el.messageList);
-    const messages = [...state.messages].sort((a, b) => (isOwner() ? a.id - b.id : a.deliveryCursor - b.deliveryCursor));
+    const messages = [...state.messages].sort((a, b) => (conversationView() ? a.id - b.id : a.deliveryCursor - b.deliveryCursor));
     const session = selectedSession();
     el.messageScope.textContent = session
       ? `Session: ${session.label || session.task || session.id}`
-      : isOwner() ? 'All sessions' : 'All sessions · messages sent or received by this account';
+      : isObserver() ? 'Enrolled projects · all conversations, including owner questions · read-only' : isOwner() ? 'All sessions' : 'All sessions · messages sent or received by this account';
     el.messageCount.textContent = String(messages.length);
     el.messageEmpty.textContent = state.messageLoading ? 'Loading messages…' : 'No messages match this view yet.';
     el.loadOlder.disabled = state.messageLoading;
@@ -643,14 +650,15 @@
     if (!state.principal) return;
     const sessionId = state.selectedSessionId;
     const kind = el.messageFilter.value;
-    const reviewState = isOwner() ? el.reviewFilter.value : '';
+    const project = visibleProject();
+    const reviewState = conversationView() ? el.reviewFilter.value : '';
     const resetView = reset || state.messageViewSessionId !== sessionId || state.messageViewKind !== kind || state.messageViewReviewState !== reviewState;
     if (!resetView && state.messageLoading) return;
     if (older && !resetView && !state.hasMoreMessages) return;
     const generation = state.generation;
     const requestId = ++state.messageGeneration;
     const isCurrent = () => generation === state.generation && requestId === state.messageGeneration &&
-      sessionId === state.selectedSessionId && kind === el.messageFilter.value && reviewState === (isOwner() ? el.reviewFilter.value : '');
+      sessionId === state.selectedSessionId && project === visibleProject() && kind === el.messageFilter.value && reviewState === (conversationView() ? el.reviewFilter.value : '');
     // One recent page per explicit refresh. History is fetched only on demand.
     const query = older && !resetView
       ? new URLSearchParams({ before: String(state.messageBefore) })
@@ -661,7 +669,8 @@
     state.messageLoading = true;
     renderMessages();
     try {
-      const payload = await request(`/messages?${query.toString()}`);
+      if(isObserver() && visibleProject()) query.set('project',visibleProject());
+      const payload = await request(`/${isObserver() ? 'conversations' : 'messages'}?${query.toString()}`);
       if (!isCurrent()) return;
       const incoming = payload.messages || [];
       if (resetView || !older) {
@@ -714,7 +723,7 @@
     for (const principal of invites) {
       const item = node('article', 'principal-item');
       const copy = node('div', 'principal-copy');
-      copy.append(node('strong', '', principal.name), node('span', 'muted small', `${principal.account} · ${(principal.projects || []).join(', ')}`));
+      copy.append(node('strong', '', principal.name), node('span', 'muted small', `${principal.account} · ${principal.profile === 'observer' ? 'Project observer' : 'Agent'} · ${(principal.projects || []).join(', ')}`));
       const revoke = node('button', 'button button-danger button-small', 'Revoke');
       revoke.type = 'button';
       revoke.addEventListener('click', () => revokePrincipal(principal));
@@ -728,9 +737,12 @@
     const projectSummary = isOwner() || projects.includes('*') ? 'All projects' : projects.length ? `Projects: ${projects.join(', ')}` : 'No projects';
     el.summary.textContent = isOwner()
       ? `Workspace owner · ${projectSummary}`
-      : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: Agent · ${projectSummary}`;
+      : `Name: ${state.principal.name} · Account: ${state.principal.account} · Role: ${isObserver() ? 'Project observer' : 'Agent'} · ${projectSummary}`;
     el.ownerTools.hidden = !isOwner();
-    el.reviewFilterWrap.hidden = !isOwner();
+    el.reviewFilterWrap.hidden = !conversationView();
+    el.messageForm.hidden = isObserver();
+    $('inbox-title').textContent = isObserver() ? 'Project conversations' : 'Inbox';
+    el.connectionHistory.hidden = !isOwner();
     for (const select of [el.agentNameFilter, el.agentModelFilter, el.machineFilter, el.branchFilter, el.environmentFilter]) select.disabled = false;
     renderSelectors();
     renderSummary();
@@ -868,9 +880,42 @@
     } catch (error) { if (!(error instanceof StaleRequestError) && generation === state.generation) toast(error.message, 'error'); }
   }
 
+  async function refreshConnectionHistory(older = false) {
+    if(!isOwner() || state.connectionLoading) return;
+    const generation=state.generation,requestId=++state.connectionGeneration;
+    const isCurrent=()=>generation===state.generation && requestId===state.connectionGeneration;
+    state.connectionLoading=true;
+    el.refreshConnections.disabled=true;el.olderConnections.disabled=true;
+    el.connectionStatus.textContent='Loading connection history…';
+    try {
+      const query=new URLSearchParams({limit:'20'});
+      if(older && state.connectionBefore!==null) query.set('before',String(state.connectionBefore));
+      const payload=await request(`/connections?${query}`);
+      if(!isCurrent()) return;
+      const incoming=payload.connections??[];
+      if(older){const known=new Set(state.connections.map(c=>c.id));state.connections.push(...incoming.filter(c=>!known.has(c.id)));}
+      else state.connections=incoming;
+      state.connectionBefore=payload.nextBefore??null;
+      clear(el.connectionList);
+      for(const connection of state.connections){
+        const item=node('article','principal-item'),copy=node('div','principal-copy');
+        copy.append(node('strong','',connection.principalName),node('span','muted small',`${formatTime(connection.connectedAt)} · ${connection.client} (reported)${connection.active ? '' : ' · revoked'}`),node('span','muted small',`Identity: ${connection.principalId}`));
+        item.append(copy);el.connectionList.append(item);
+      }
+      el.connectionStatus.textContent=state.connections.length ? `${state.connections.length} connections shown.` : 'No recorded connections yet.';
+      el.olderConnections.hidden=state.connectionBefore===null;
+    } catch(error) {if(isCurrent() && !(error instanceof StaleRequestError)) el.connectionStatus.textContent=error.message;}
+    finally {if(isCurrent()){state.connectionLoading=false;el.refreshConnections.disabled=false;el.olderConnections.disabled=false;}}
+  }
+
+  el.refreshConnections.addEventListener('click',()=>refreshConnectionHistory());
+  el.olderConnections.addEventListener('click',()=>refreshConnectionHistory(true));
+
   async function startSession() {
     const generation = state.generation;
     const me = await request('/me');
+    if(generation !== state.generation) return;
+    await request('/connections', {method:'POST',body:JSON.stringify({connectionId:crypto.randomUUID(),client:'web'})});
     if (generation !== state.generation) return;
     state.principal = me.principal;
     showConnection(true);
@@ -892,6 +937,16 @@
     state.messages = [];
     state.ownership = [];
     state.principals = [];
+    state.connections = [];
+    state.connectionBefore = null;
+    state.connectionLoading = false;
+    state.connectionGeneration += 1;
+    el.refreshConnections.disabled=false;
+    el.olderConnections.disabled=false;
+    clear(el.connectionList);
+    el.connectionStatus.textContent = 'Refresh to view connections.';
+    el.olderConnections.hidden = true;
+    el.connectionHistory.hidden = true;
     state.selectedSessionId = '';
     state.attributionGeneration += 1;
     state.attribution = { sessionId: '', segments: [], cursor: null, hasMore: false, loading: false, error: '' };
@@ -1100,7 +1155,7 @@
     try {
       const payload = await request('/principals', {
         method: 'POST',
-        body: JSON.stringify({ name: $('invite-name').value.trim(), account: $('invite-account').value.trim(), projects }),
+        body: JSON.stringify({ name: $('invite-name').value.trim(), account: $('invite-account').value.trim(), projects, profile:$('invite-profile').value }),
       });
       if (generation !== state.generation) return;
       el.inviteForm.reset();

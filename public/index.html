@@ -208,7 +208,10 @@
               <div class="section-heading"><div><p class="eyebrow">Owner controls</p><h2 id="owner-title">Invitations</h2></div></div>
               <p class="muted small">Invites grant hub coordination access for selected project slugs only. They do not grant provider or production permissions.</p>
               <form id="invite-form" class="stack-form">
-                <label for="invite-name">Agent name</label><input id="invite-name" maxlength="120" required />
+                <label for="invite-profile">Access profile</label>
+                <select id="invite-profile"><option value="agent">Agent — own conversations</option><option value="observer">Project observer — all project conversations, including owner questions</option></select>
+                <p class="form-note">Project observers can read and report their own sessions. They cannot send messages, acknowledge receipts or manage invitations.</p>
+                <label for="invite-name">Name</label><input id="invite-name" maxlength="120" required />
                 <label for="invite-account">Account label</label><input id="invite-account" maxlength="120" required />
                 <label for="invite-projects">Project slugs <span class="muted">(comma separated)</span></label><input id="invite-projects" maxlength="500" placeholder="my-project" required />
                 <button class="button button-secondary full-width" type="submit">Create invite</button>
@@ -222,6 +225,14 @@
               </div>
               <h3 class="subheading">Active invites</h3>
               <div id="principal-list" class="principal-list"></div>
+            </section>
+            <section id="connection-history" class="panel section-panel" aria-labelledby="connections-title" hidden>
+              <div class="section-heading"><div><p class="eyebrow">Owner activity</p><h2 id="connections-title">Connection history</h2></div></div>
+              <p class="muted small">Explicit sign-ins recorded for 90 days. Identity is authenticated; client type is reported. This is not a log of every request.</p>
+              <button id="refresh-connections" class="button button-secondary" type="button">Refresh history</button>
+              <p id="connection-history-status" class="form-note" role="status">Refresh to view connections.</p>
+              <div id="connection-list" class="principal-list"></div>
+              <button id="older-connections" class="button button-quiet" type="button" hidden>Load older connections</button>
             </section>
           </aside>
         </section>

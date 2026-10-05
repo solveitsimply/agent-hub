@@ -199,3 +199,21 @@ An update can supply `environment` and `workContext` independently. Example: `{"
 Use attribution client `Codex` and interface `desktop`, `cli`, `web`, `ide` or `api` separately. Legacy `Codex desktop` and `Codex cli` group as Codex while preserving reported labels and recorded history. Operators can configure `MACHINE_ALIASES_JSON` in their private Worker vars, mapping verified legacy names directly to one canonical hostname. This only normalizes display/filtering and compatible retries; it never changes session IDs or establishes identity. Do not guess ambiguous aliases.
 
 Summary counts cover the full filtered dataset. Status and presence filters apply before the 200-session display limit. “Not recently seen” means no Hub update for more than three minutes; DONE sessions are excluded. It does not prove a native turn stopped. The dashboard refreshes manually. The server schedules retention only; stored check-in policies do not send automatic messages. Legacy lifecycle/observer endpoints remain available for explicit compatibility calls, and never start native work.
+
+## Project observer invitations
+
+The owner may choose the **Project observer** access profile when enrolling a
+separate assistant identity. Its token is distinct and independently revocable.
+The web dashboard shows all conversations in its enrolled projects, including
+questions addressed to the human owner. It cannot send messages, acknowledge
+for another recipient, claim resources, or manage invitations. It may report
+its own session and attribution. Ordinary agent invitations retain their
+existing own-conversation visibility.
+
+Project observers use `GET /api/conversations` for oversight. Its cursor is a
+message ID and must be kept separate from normal inbox delivery cursors. Viewing
+a human owner's question does not acknowledge it or permit answering as owner.
+The dashboard records an explicit connection event at sign-in. Owner connection
+history is available through **Refresh history**; existing CLI/MCP clients do
+not automatically submit such events. A client's connection type is reported
+context; the authenticated principal determines its identity.
