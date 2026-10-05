@@ -1,3 +1,4 @@
+import { accessApi } from './access-api.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
 import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint } from './lifecycle.mjs';
@@ -64,14 +65,14 @@ function detailsOf(value){
   }
   if(JSON.stringify(output).length>6000)fail(422,'INVALID_DETAILS','Release details exceed 6000 characters.');return output;
 }
-const principalView = row=>({id:row.id,name:row.name,account:row.account,role:row.role,projects:JSON.parse(row.projects_json),active:row.active===1});
+const principalView = row=>({id:row.id,name:row.name,account:row.account,role:row.role,profile:row.access_profile??'agent',projects:JSON.parse(row.projects_json),active:row.active===1});
 async function authenticate(request,env,db){
   if(typeof env.OWNER_TOKEN!=='string'||env.OWNER_TOKEN.length<32)fail(503,'NOT_CONFIGURED','Owner authentication is not configured.');
   const authorization=request.headers.get('authorization');
   if(!authorization?.startsWith('Bearer ')||authorization.length>520)fail(401,'UNAUTHORIZED','Connect with a valid workspace invitation.');
   const token=authorization.slice(7);const tokenHash=await digest(token);
-  if(equal(tokenHash,await digest(env.OWNER_TOKEN)))return {id:'owner',name:'Workspace owner',account:'Owner',role:'owner',projects:['*']};
-  const row=await db.prepare('SELECT id,name,account,role,projects_json,active FROM principals WHERE token_hash=? AND active=1 AND role=\'agent\'').bind(tokenHash).first();
+  if(equal(tokenHash,await digest(env.OWNER_TOKEN)))return {id:'owner',name:'Workspace owner',account:'Owner',role:'owner',profile:'owner',projects:['*']};
+  const row=await db.prepare('SELECT * FROM principals WHERE token_hash=? AND active=1 AND role=\'agent\'').bind(tokenHash).first();
   if(!row)fail(401,'UNAUTHORIZED','Connect with a valid workspace invitation.');return principalView(row);
 }
 const latestAttribution = row=>{
@@ -117,7 +118,7 @@ async function sessionById(db,id,principal,own=false,{custodyOnly=false}={}){
   if(own&&row.principal_id!==principal.id)fail(403,'SESSION_OWNER_REQUIRED','Only the principal owning that session can update or send from it.');return row;
 }
 const MESSAGE_SELECT='SELECT m.*,sender.name AS sender_name,recipient.name AS recipient_name FROM messages m JOIN principals sender ON sender.id=m.from_principal_id JOIN principals recipient ON recipient.id=m.to_principal_id';
-const messageView=(row,principal)=>({id:row.id,fromSessionId:row.from_session_id,toSessionId:row.to_session_id,fromPrincipalId:row.from_principal_id,toPrincipalId:row.to_principal_id,fromPrincipalName:row.sender_name,toPrincipalName:row.recipient_name,project:row.project,kind:row.kind,body:principal.role==='owner'||(row.review_state==='APPROVED'&&row.to_session_id!==null)?row.body:null,replyTo:row.reply_to,createdAt:row.created_at,acknowledgedAt:row.acknowledged_at,reviewState:row.review_state,reviewedAt:row.reviewed_at,deliveryCursor:row.delivery_id,...(principal.role==='owner'?{payloadHash:row.payload_hash}:{})});
+const messageView=(row,principal,conversation=false)=>({id:row.id,fromSessionId:row.from_session_id,toSessionId:row.to_session_id,fromPrincipalId:row.from_principal_id,toPrincipalId:row.to_principal_id,fromPrincipalName:row.sender_name,toPrincipalName:row.recipient_name,project:row.project,kind:row.kind,body:principal.role==='owner'||(conversation&&principal.profile==='observer'&&mayProject(principal,row.project))||(row.review_state==='APPROVED'&&row.to_session_id!==null)?row.body:null,replyTo:row.reply_to,createdAt:row.created_at,acknowledgedAt:row.acknowledged_at,reviewState:row.review_state,reviewedAt:row.reviewed_at,deliveryCursor:row.delivery_id,...(principal.role==='owner'?{payloadHash:row.payload_hash}:{})});
 const requireActive=session=>{if(session?.archived_at)fail(409,'SESSION_ARCHIVED','This session was archived; register a new session for new work.');};
 const audit=(db,principal,action,id)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND CASE WHEN EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?) THEN 0 ELSE (SELECT COUNT(*)<100000 AND COUNT(*) FILTER (WHERE principal_id=?)<10000 FROM audit_events) END`).bind(principal.id,action,String(id),now(),principal.id,principal.id,action,String(id),dayAgo(),principal.id);
 async function messageById(db,id,principal){
@@ -145,19 +146,26 @@ async function api(request,env){
   const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
   const path=url.pathname,method=request.method;
+  if(principal.profile==='observer'&&method!=='GET'&&path!=='/api/connections'&&!(path==='/api/sessions'&&method==='POST')&&!(/^\/api\/sessions\/[^/]+(?:\/(?:heartbeat|archive|attribution))?$/.test(path)&&['POST','PATCH'].includes(method)))fail(403,'OBSERVER_READ_ONLY','Project observers can read conversations and report their own sessions, but cannot send, acknowledge or manage coordination.');
+  const accessResponse=await accessApi({path,method,url,db,principal,readBody,fail,checkKeys,string,numeric,readOptions,ownerOnly,requireProject,sessionById,requireCurrent,json,messageSelect:MESSAGE_SELECT,messageView,activePrincipal:ACTIVE_PRINCIPAL,now});
+  if(accessResponse)return accessResponse;
   const lifecycleResponse=await lifecycleApi({path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select:SESSION_SELECT,messageById});
   if(lifecycleResponse)return lifecycleResponse;
   if(path==='/api/me'&&method==='GET')return json({principal});
   if(path==='/api/principals'&&method==='GET'){
-    ownerOnly(principal);const rows=await db.prepare("SELECT id,name,account,role,projects_json,active FROM principals WHERE id!='hub-accountability' ORDER BY created_at DESC LIMIT 200").all();return json({principals:rows.results.map(principalView)});
+    ownerOnly(principal);const rows=await db.prepare("SELECT * FROM principals WHERE id!='hub-accountability' ORDER BY created_at DESC LIMIT 200").all();return json({principals:rows.results.map(principalView)});
   }
   if(path==='/api/principals'&&method==='POST'){
-    ownerOnly(principal);const body=await readBody();checkKeys(body,['name','account','projects']);
+    ownerOnly(principal);const body=await readBody();checkKeys(body,['name','account','projects','profile']);
+    const profile=body.profile??'agent';if(!['agent','observer'].includes(profile))fail(422,'INVALID_PROFILE','Choose agent or observer.');
     if(!Array.isArray(body.projects)||body.projects.length<1||body.projects.length>20)fail(422,'INVALID_PROJECTS','Select 1 to 20 explicit project scopes.');
     const projects=[...new Set(body.projects.map(slug))];const id=crypto.randomUUID();const bytes=crypto.getRandomValues(new Uint8Array(32));const token='hub_agent_'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
     const name=string(body.name,'name',120),account=string(body.account,'account',160);
-    await db.batch([db.prepare('INSERT INTO principals(id,name,account,role,token_hash,projects_json,created_at) VALUES (?,?,?,\'agent\',?,?,?)').bind(id,name,account,await digest(token),JSON.stringify(projects),now()),audit(db,principal,'invite.created',id)]);
-    return json({principal:{id,name,account,role:'agent',projects,active:true},token},201);
+    const insert=profile==='observer'
+      ? db.prepare('INSERT INTO principals(id,name,account,role,token_hash,projects_json,created_at,access_profile) VALUES (?,?,?,\'agent\',?,?,?,?)').bind(id,name,account,await digest(token),JSON.stringify(projects),now(),profile)
+      : db.prepare('INSERT INTO principals(id,name,account,role,token_hash,projects_json,created_at) VALUES (?,?,?,\'agent\',?,?,?)').bind(id,name,account,await digest(token),JSON.stringify(projects),now());
+    await db.batch([insert,audit(db,principal,'invite.created',id)]);
+    return json({principal:{id,name,account,role:'agent',profile,projects,active:true},token},201);
   }
   const principalMatch=path.match(/^\/api\/principals\/([^/]+)$/);
   if(principalMatch&&method==='DELETE'){
@@ -357,5 +365,6 @@ export default {
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCMinutes()!==17)return;
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();
     await env.DB.batch([env.DB.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),env.DB.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
+    try{await env.DB.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
   },
 };
