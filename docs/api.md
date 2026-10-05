@@ -28,7 +28,7 @@ GET /api/ownership?project=slug&resourceKey=exact-key -> {ownership}; fields pro
 POST /api/ownership/claim {sessionId,resourceKey} -> {ownership}; same principal session required. Atomic single owner per project+resourceKey. Retry by owner succeeds, any other owner returns409 even if heartbeat stale. No implicit lease expiry or takeover.
 POST /api/ownership/release {sessionId,resourceKey} -> {released:true}; exact current owner session only. Owner/admin cannot silently steal a live agent's claim.
 
-Frontend polls at30seconds only while visible. Clients may explicitly heartbeat at work boundaries; no heartbeat daemon is included. CLI accepts HUB_URL/HUB_TOKEN env, never token command-line flags/URLs. Invites and connect controls must not print token values to logs. Public API health /health returns only {ok:true,service:"agent-hub"}.
+Frontend refresh is manual. Clients may explicitly heartbeat at work boundaries when no status/checkpoint update already refreshed presence; no heartbeat daemon is included. CLI accepts HUB_URL/HUB_TOKEN env, never token command-line flags/URLs. Invites and connect controls must not print token values to logs. Public API health /health returns only {ok:true,service:"agent-hub"}.
 
 POST /api/sessions/:id/archive {} -> {session}; exact owning principal only, statusDONE and no held coordination claims. It hides the session from active lists/capacity while retaining message/audit custody. Repeating archive is idempotent. Archived sessions cannot send, receive, heartbeat, update, or claim; historical inbox reads remain authorized. Capacity100active perprincipal/2000total; completing/archiving sessions restores capacity.
 
@@ -44,6 +44,14 @@ Session responses add project-scoped `workContext` and `reportedMachine`. Enviro
 
 
 ## Compact agent reads
+
+GET `/api/messages` also accepts `direction=all|incoming`. HTTP defaults to
+`all`; `incoming` requires an exact authorized `sessionId` and selects only
+that recipient. MCP/CLI inbox defaults to incoming to avoid echoing sent bodies;
+explicit all-direction reads retain conversation history. Invalid directions or
+incoming without a session return 422. Review, principal/project/session custody,
+complete message bodies, cursor ordering and acknowledgment checks are unchanged.
+Use separate cursors per direction as well as session/kind.
 
 When the storage provider rejects a query because its free daily read allowance
 is exhausted, the API returns HTTP 503, error code `STORAGE_READ_QUOTA_EXCEEDED`,

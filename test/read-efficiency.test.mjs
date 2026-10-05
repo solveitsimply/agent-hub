@@ -55,6 +55,36 @@ async function register(f,token,project,status,machine){
   assert.equal(result.status,201);return result.body.session;
 }
 
+test('incoming inbox excludes sent echoes without skipping unread deliveries or changing custody',async t=>{
+  const f=fixture(t,{throughMigration:'0006'}),a=await invite(f,'reader',['alpha']),b=await invite(f,'peer',['alpha']),foreign=await invite(f,'foreign',['beta']);
+  const x=await register(f,a.token,'alpha','RUNNING','reader'),y=await register(f,b.token,'alpha','RUNNING','peer'),z=await register(f,foreign.token,'beta','RUNNING','foreign');
+  const send=async(token,from,to,body)=>{const r=await f.call(token,'/api/messages',{project:'alpha',fromSessionId:from,toSessionId:to,kind:'NOTE',body,idempotencyKey:crypto.randomUUID()});assert.equal(r.status,201);return r.body.message;};
+  const first=await send(b.token,y.id,x.id,'Incoming complete first body');
+  const outgoing=await send(a.token,x.id,y.id,'Sent body must not reenter the default inbox');
+  const second=await send(b.token,y.id,x.id,'Incoming complete second body');
+  const statements=[],prepare=f.DB.prepare.bind(f.DB);f.DB.prepare=sql=>{statements.push(sql);return prepare(sql);};
+  const path=`/api/messages?view=compact&direction=incoming&sessionId=${x.id}&limit=1`;
+  const page=(await f.call(a.token,path)).body;
+  assert.ok(statements.some(sql=>sql.startsWith('SELECT s.id,s.project,s.principal_id,s.archived_at')));
+  assert.ok(!statements.some(sql=>sql.startsWith('SELECT s.*')),'inbox custody does not load lifecycle/history');
+  assert.deepEqual(page.messages.map(m=>m.id),[first.id]);assert.equal(page.messages[0].body,first.body);assert.equal(page.nextCursor,first.deliveryCursor);assert.equal(page.hasMore,true);
+  const next=(await f.call(a.token,path+'&after='+page.nextCursor)).body;
+  assert.deepEqual(next.messages.map(m=>m.id),[second.id]);assert.equal(next.nextCursor,second.deliveryCursor);assert.equal(next.hasMore,false);
+  const empty=(await f.call(a.token,path+'&after='+next.nextCursor)).body;
+  assert.deepEqual(empty.messages,[]);assert.equal(empty.nextCursor,next.nextCursor);
+  const all=(await f.call(a.token,`/api/messages?sessionId=${x.id}`)).body;
+  assert.deepEqual(all.messages.map(m=>m.id),[first.id,outgoing.id,second.id],'HTTP/dashboard default retains both sides');
+  assert.equal((await f.call(a.token,`/api/messages?direction=incoming&sessionId=${z.id}`)).status,403);
+  assert.equal((await f.call(a.token,'/api/messages?direction=incoming')).status,422);
+  assert.equal((await f.call(a.token,`/api/messages?direction=typo&sessionId=${x.id}`)).status,422);
+  assert.equal((await f.call(a.token,`/api/messages/${outgoing.id}/ack`,{sessionId:x.id})).status,403);
+  f.DB.database.prepare('UPDATE sessions SET archived_at=? WHERE id=?').run(new Date().toISOString(),x.id);
+  assert.deepEqual((await f.call(a.token,path)).body.messages.map(m=>m.id),[first.id],'authorized archived history stays readable');
+  assert.equal((await f.call(a.token,'/api/messages',{project:'alpha',fromSessionId:x.id,toSessionId:y.id,kind:'NOTE',body:'Archived sender',idempotencyKey:crypto.randomUUID()})).status,409);
+  await f.call(OWNER,`/api/principals/${a.principal.id}`,{},'DELETE');
+  assert.equal((await f.call(a.token,path)).status,401,'revocation still applies to every read');
+});
+
 test('D1 query plans use indexes for ownership, recipient delivery, check-in and opt-in reads',t=>{
   const {DB}=fixture(t),db=DB.database;
   db.prepare("INSERT INTO principals(id,name,account,role,token_hash,projects_json,created_at) VALUES ('reader','Reader','reader@example.test','agent','reader-hash','[\"alpha\"]','2026-10-04T00:00:00.000Z')").run();

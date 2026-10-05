@@ -49,6 +49,11 @@ const compactInbox=await call(b.body.token,'/api/messages?view=compact&limit=1&s
 assert.equal(compactInbox.status,200);assert.equal(compactInbox.body.messages[0].id,sent.body.message.id);assert.equal(compactInbox.body.messages[0].body,payload.body);assert.equal(compactInbox.body.nextCursor,compactInbox.body.messages[0].deliveryCursor);
 const incremental=await call(b.body.token,'/api/messages?view=compact&sessionId='+y.id+'&after='+compactInbox.body.nextCursor);
 assert.deepEqual(incremental.body.messages,[]);assert.equal(incremental.body.nextCursor,compactInbox.body.nextCursor);assert.equal(incremental.body.hasMore,false);
+const incoming=await call(a.body.token,'/api/messages?view=compact&direction=incoming&sessionId='+x.id);
+assert.equal(incoming.status,200);assert.deepEqual(incoming.body.messages,[],'outgoing body is not echoed to its author');
+const received=await call(b.body.token,'/api/messages?view=compact&direction=incoming&sessionId='+y.id);
+assert.equal(received.body.messages[0].body,payload.body);assert.equal(received.body.nextCursor,sent.body.message.deliveryCursor);
+assert.equal((await call(a.body.token,'/api/messages?direction=incoming')).status,422);
 assert.equal((await call(a.body.token,'/api/sessions?view=compact&limit=201')).status,422);
 
 assert.equal((await call(b.body.token,'/api/sessions/'+x.id,{workContext:null},'PATCH')).status,403);

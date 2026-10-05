@@ -5,6 +5,9 @@ import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import {mkdtemp,readFile,readdir,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 
 const root = new URL('../', import.meta.url);
 const cliPath = fileURLToPath(new URL('../scripts/hub-client.mjs', import.meta.url));
@@ -39,10 +42,10 @@ function runCli(args, { url, input = '' }) {
   });
 }
 
-function startBridge(url) {
+function startBridge(url, extraEnv={}) {
   const child = spawn(process.execPath, [bridgePath], {
     cwd: fileURLToPath(root),
-    env: { ...process.env, HUB_URL: url, HUB_TOKEN: TOKEN },
+    env: { ...process.env, HUB_URL: url, HUB_TOKEN: TOKEN, HUB_METRICS_DIR:'',...extraEnv },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const lines = createInterface({ input: child.stdout });
@@ -328,6 +331,11 @@ test('CLI and MCP expose the same complete discovery filters and full escape hat
   bridge.send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'hub_read_inbox',arguments:{sessionId:'session-id',after:7,kind:'NOTE',limit:1}}});
   assert.equal(JSON.parse(await bridge.next()).result.isError,undefined);
   assert.deepEqual(Object.fromEntries(new URL(urls[2],url).searchParams),Object.fromEntries(new URL(urls[3],url).searchParams));
+  assert.equal(new URL(urls[2],url).searchParams.get('direction'),'incoming');
+  const history=await runCli(['inbox','session-id','7','--direction','all'],{url});
+  assert.equal(history.code,0,history.stderr);assert.equal(new URL(urls[4],url).searchParams.get('direction'),'all');
+  bridge.send({jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'hub_read_inbox',arguments:{sessionId:'session-id',direction:'invalid'}}});
+  assert.equal(JSON.parse(await bridge.next()).result.isError,true);assert.equal(urls.length,5,'invalid direction never sends a request');
 });
 
 test('compact write receipts omit echoes but retain revision; full is stripped from mutation body',async t=>{
@@ -363,4 +371,17 @@ test('checkpoint receipts retain current revision while lifecycle reads retain c
   assert.deepEqual(JSON.parse(JSON.parse(await bridge.next()).result.content.at(-1).text),{lifecycle});
   const cli=await runCli(['lifecycle','session'],{url});assert.equal(cli.code,0,cli.stderr);assert.deepEqual(JSON.parse(cli.stdout),{lifecycle});
   assert.deepEqual(requests[0].body,{expectedRevision:8,checkpoint:lifecycle.checkpoint});
+});
+
+test('MCP metrics record one explicit call without logging payloads or changing stdout',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'hub-bridge-counters-'));t.after(()=>rm(dir,{recursive:true}));let requests=0;
+  const url=await localServer(t,(_request,response)=>{requests++;response.end(JSON.stringify({messages:[],nextCursor:8,hasMore:false}));});
+  const bridge=startBridge(url,{HUB_METRICS_DIR:dir});
+  bridge.send({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'hub_read_inbox',arguments:{sessionId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',after:8}}});
+  const result=JSON.parse(await bridge.next());assert.deepEqual(JSON.parse(result.result.content.at(-1).text),{messages:[],nextCursor:8,hasMore:false});
+  const closed=once(bridge.child,'close');bridge.child.stdin.end();await closed;
+  assert.equal(requests,1);assert.equal(bridge.stderr,'');
+  const files=await readdir(dir);assert.equal(files.length,1);const text=await readFile(join(dir,files[0]),'utf8');
+  assert.ok(!text.includes(TOKEN));assert.ok(!text.includes('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'));
+  assert.equal(JSON.parse(text).total.calls,1);assert.equal(JSON.parse(text).total.emptyInboxes,1);
 });

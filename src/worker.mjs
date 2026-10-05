@@ -110,8 +110,9 @@ const sessionFilters = (url,aliases)=>{
   }
   return {clauses,values};
 };
-async function sessionById(db,id,principal,own=false){
-  const row=await db.prepare(`${SESSION_SELECT} WHERE s.id=?`).bind(string(id,'sessionId',80)).first();
+const SESSION_CUSTODY_SELECT='SELECT s.id,s.project,s.principal_id,s.archived_at FROM sessions s JOIN principals p ON p.id=s.principal_id';
+async function sessionById(db,id,principal,own=false,{custodyOnly=false}={}){
+  const row=await db.prepare(`${custodyOnly?SESSION_CUSTODY_SELECT:SESSION_SELECT} WHERE s.id=?`).bind(string(id,'sessionId',80)).first();
   if(!row)fail(404,'SESSION_NOT_FOUND','Session not found.');requireProject(principal,row.project);
   if(own&&row.principal_id!==principal.id)fail(403,'SESSION_OWNER_REQUIRED','Only the principal owning that session can update or send from it.');return row;
 }
@@ -257,8 +258,8 @@ async function api(request,env){
   if(path==='/api/messages'&&method==='POST'){
     const body=await readBody();checkKeys(body,['fromSessionId','toSessionId','project','kind','body','idempotencyKey','replyTo']);const project=slug(body.project);requireProject(principal,project);
     if(!KINDS.has(body.kind))fail(422,'INVALID_KIND','Select a supported message kind.');
-    const from=body.fromSessionId?await sessionById(db,body.fromSessionId,principal,true):null;if(!from&&principal.role!=='owner')fail(403,'SENDER_REQUIRED','An agent must send from its own registered session.');
-    const to=body.toSessionId?await sessionById(db,body.toSessionId,principal):null;requireActive(from);requireActive(to);
+    const from=body.fromSessionId?await sessionById(db,body.fromSessionId,principal,true,{custodyOnly:true}):null;if(!from&&principal.role!=='owner')fail(403,'SENDER_REQUIRED','An agent must send from its own registered session.');
+    const to=body.toSessionId?await sessionById(db,body.toSessionId,principal,false,{custodyOnly:true}):null;requireActive(from);requireActive(to);
     if(!to&&body.kind!=='QUESTION')fail(422,'RECIPIENT_REQUIRED','Only a question can be addressed directly to the workspace owner.');
     if(!from&&!to)fail(422,'RECIPIENT_REQUIRED','Select a recipient session.');
     if((from&&from.project!==project)||(to&&to.project!==project))fail(403,'PROJECT_MISMATCH','Sender and recipient must both belong to the selected project.');
@@ -280,8 +281,11 @@ async function api(request,env){
   if(path==='/api/messages'&&method==='GET'){
     const {view,limit}=readOptions(url,100);
     const owner=principal.role==='owner',cursorColumn=owner?'m.id':'m.delivery_id';
-    const after=numeric(url.searchParams.get('after')??0,'after');const sessionId=url.searchParams.get('sessionId');let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
-    if(sessionId){const session=await sessionById(db,sessionId,principal);query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}
+    const after=numeric(url.searchParams.get('after')??0,'after');const sessionId=url.searchParams.get('sessionId');
+    const direction=url.searchParams.get('direction')??'all';
+    if(!['all','incoming'].includes(direction)||direction==='incoming'&&!sessionId)fail(422,'INVALID_DIRECTION','Use all, or incoming with an exact sessionId.');
+    let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
+    if(sessionId){const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true});if(direction==='incoming'){query+=' AND m.to_session_id=?';values.push(session.id);}else{query+=' AND (m.from_session_id=? OR m.to_session_id=?)';values.push(session.id,session.id);}}
     if(!owner){query+=` AND m.review_state='APPROVED' AND m.to_session_id IS NOT NULL AND (m.from_principal_id=? OR m.to_principal_id=?) AND m.project IN (${principal.projects.map(()=>'?').join(',')})`;values.push(principal.id,principal.id,...principal.projects);}
     const reviewState=url.searchParams.get('reviewState');if(reviewState!==null){ownerOnly(principal);if(!['PENDING','APPROVED','REJECTED'].includes(reviewState))fail(422,'INVALID_REVIEW','Select a supported review state.');query+=' AND m.review_state=?';values.push(reviewState);}
     const kind=url.searchParams.get('kind');
@@ -299,7 +303,7 @@ async function api(request,env){
   if(ackMatch&&method==='POST'){
     const body=await readBody();checkKeys(body,['sessionId']);const row=await messageById(db,numeric(ackMatch[1],'messageId'),principal);
     if(row.to_principal_id!==principal.id)fail(403,'RECIPIENT_REQUIRED','Only the recipient can acknowledge a message.');
-    if(row.to_session_id){const session=await sessionById(db,body.sessionId,principal,true);if(session.id!==row.to_session_id)fail(403,'RECIPIENT_REQUIRED','Select the exact receiving session.');}
+    if(row.to_session_id){const session=await sessionById(db,body.sessionId,principal,true,{custodyOnly:true});if(session.id!==row.to_session_id)fail(403,'RECIPIENT_REQUIRED','Select the exact receiving session.');}
     else if(principal.role!=='owner'||body.sessionId!==undefined)fail(403,'OWNER_REQUIRED','Owner questions require owner acknowledgment.');
     if(row.review_state!=='APPROVED'&&!(principal.role==='owner'&&row.to_session_id===null))fail(403,'MESSAGE_NOT_DELIVERED','Only an approved delivery or human owner question can be acknowledged.');
     await db.prepare(`UPDATE messages SET acknowledged_at=COALESCE(acknowledged_at,?) WHERE id=? AND to_principal_id=? AND (review_state='APPROVED' OR to_session_id IS NULL) AND ${ACTIVE_PRINCIPAL}`).bind(now(),row.id,principal.id,principal.id).run();await requireCurrent(db,principal);return json({message:messageView(await messageById(db,row.id,principal),principal)});
@@ -314,7 +318,7 @@ async function api(request,env){
     const rows=await db.prepare(query+' ORDER BY o.claimed_at DESC LIMIT 200').bind(...values).all();return json({ownership:rows.results.map(row=>ownershipView(row,key))});
   }
   if(['/api/ownership/claim','/api/ownership/release'].includes(path)&&method==='POST'){
-    const body=await readBody();checkKeys(body,['sessionId','resourceKey']);const session=await sessionById(db,body.sessionId,principal,true);requireActive(session);const resourceKey=string(body.resourceKey,'resourceKey',160);
+    const body=await readBody();checkKeys(body,['sessionId','resourceKey']);const session=await sessionById(db,body.sessionId,principal,true,{custodyOnly:true});requireActive(session);const resourceKey=string(body.resourceKey,'resourceKey',160);
     if(path.endsWith('/release')){const result=await db.prepare('DELETE FROM ownership WHERE project=? AND resource_key=? AND owner_session_id=? AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(session.project,resourceKey,session.id,principal.id).run();await requireCurrent(db,principal);if(!result.meta.changes)fail(409,'OWNER_MISMATCH','This session does not hold that coordination claim.');await audit(db,principal,'ownership.released',session.id).run();return json({released:true});}
     await db.prepare('INSERT INTO ownership(project,resource_key,owner_session_id,claimed_at) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1) AND (SELECT COUNT(*) FROM ownership WHERE owner_session_id=?)<100 AND (SELECT COUNT(*) FROM ownership)<5000 AND EXISTS(SELECT 1 FROM sessions WHERE id=? AND archived_at IS NULL) ON CONFLICT(project,resource_key) DO NOTHING').bind(session.project,resourceKey,session.id,now(),principal.id,session.id,session.id).run();
     await requireCurrent(db,principal);
