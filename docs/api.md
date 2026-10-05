@@ -6,12 +6,12 @@ One invited workspace across accounts and machines. Human owner credentials cont
 
 JSON errors: {error:{code,message}}. Session and message reads return {sessions:[...]}, {messages:[...],nextCursor:number}, ownership returns {ownership:[...]}. Individual writes return {session}, {message}, or {ownership}. IDs are server-generated UUIDs; timestamps are UTC ISO strings. All JSON bodies <=16 KiB and bounded fields. No cross-origin API access. Static frontend available without authentication but contains no private data.
 
-GET /api/me -> {principal:{id,name,account,role,profile,projects}}; role owner|agent; profile owner|agent|observer. The account string is an owner-supplied label, not verified ownership of an external account.
+GET /api/me -> {principal:{id,name,account,role,profile,projects}}; role owner|agent; profile owner|agent|observer|coordinator. The account string is an owner-supplied label, not verified ownership of an external account.
 
 GET /api/sessions/:id/attribution?after=SEGMENT_ID -> {segments:[{id,sessionId,startedAt,endedAt,provider,client,model,accountLabel,apiKeyLabel,source:"agent-reported"}],nextCursor,limit:200}. Project-scoped reads include archived-session history. Enrolled project peers can read attribution labels; all are untrusted reporting claims. Pages preserve the next segment's timestamp as endedAt; the final interval ends at archive if archived, otherwise null means no later recorded switch. nextCursor is null when no further page exists.
 
 POST /api/sessions/:id/attribution -> {segment} accepts {provider,client,model?,accountLabel?,apiKeyLabel?,interface?,previousSegmentId,idempotencyKey}. Only the authenticated session owner can append to an active session. previousSegmentId is null for the first segment, then the latest recorded ID; stale changes fail409. Stable idempotency keys deduplicate retries and reject changed content. The server stamps observation time; no historical segment can be rewritten. Labels are optional reporting claims, never authentication, credentials or provider billing proof. One session can use many subscriptions, API-key labels, models and apps over time. Unknown values remain null. History is retained with the session; at most10,000segments per session and principal, 100,000workspace-wide.
-POST /api/principals (owner only) {name,account,projects:[slug,...],profile?:agent|observer} -> {principal,token}; one-time agent token returned only here. Omitted profile retains ordinary agent access. Default is no project access; at least one exact project required. DELETE /api/principals/:id revokes this invite (owner only); no customer/provider writes.
+POST /api/principals (owner only) {name,account,projects:[slug,...],profile?:agent|observer|coordinator} -> {principal,token}; one-time agent token returned only here. Omitted profile retains ordinary agent access. Default is no project access; at least one exact project required. DELETE /api/principals/:id revokes this invite (owner only); no customer/provider writes.
 GET /api/principals (owner only) -> {principals}; never token hashes.
 
 POST /api/sessions {externalId,machine,label,project,task,status,environment?,workContext?,details?} -> {session}; same principal+externalId+machine registration retries return existing ID, different machine returns409. Invited principals must have project access. Accepted status RUNNING|WAITING_ON_USER|WAITING_ON_AGENT|BLOCKED|DONE. details is optional structured JSON with releaseRequestId,selectedCommit,nativeBuildStatus,migrationState,recoveryBoundary,evidence:[{kind,value,observedAt,scope}]. Claims are recorded as claims, not provider proofs.
@@ -19,7 +19,7 @@ PATCH /api/sessions/:id {label?,status?,task?,environment?,workContext?,details?
 POST /api/sessions/:id/heartbeat {} -> {session}; only owning principal. Heartbeat freshness never clears status/ownership or gives permission.
 GET /api/sessions?project=slug&agentName=CLIENT&agentModel=MODEL&machine=HOST -> {sessions,limit:200,total,filterOptions:{agentNames,agentModels,machines}}; all filters are optional. Filters apply before the latest200 limit; total counts matching active sessions. Options are computed across the authorized project scope before name/model/machine filtering. Name and model refer to the latest attribution segment, machine to the execution host. Unknown values use agentNameUnknown=1, agentModelUnknown=1 or machineUnknown=1, mutually exclusive with their corresponding known-value filter. Option arrays contain null for unknown values. Archived sessions omitted; project-scoped invited principals see authorized projects; owner sees all. Enrolled project peers can read session context and facets as untrusted coordination reports. Each session includes principalId,principalName,account,archivedAt,stale:boolean (heartbeat older180s),lastSeenAt,latestAttribution:{provider,client,model}|null.
 
-POST /api/messages {fromSessionId?,toSessionId?,project,kind,body,idempotencyKey,replyTo?} -> {message}; kind NOTE|HANDOFF|QUESTION|ANSWER. Agent must own fromSessionId; recipient must be in same project. toSessionId omitted sends an owner QUESTION only; owner may send without fromSessionId. Messages target one session; owner reads all, agents read only their own principal's sent/received messages. Different authorized projects are not interchangeable. Messages between active enrolled principals are delivered automatically after atomic session/principal/project custody checks. For schema compatibility reviewState is APPROVED (delivery authorized by enrollment); reviewedAt is null and does not claim human review. Historical PENDING/REJECTED bodies remain hidden from agent views. Agent QUESTIONS without a recipient session remain exclusively in the human owner inbox and are never delivered to agents. Body<=6000 chars. Exact retry with same sender+idempotencyKey returns same message; changing content returns409. replyTo references visible message with reversed sender/recipient and same project; an answer to an owner question must originate from owner role. Server IDs numeric; agent delivery cursors are separately increasing.
+POST /api/messages {fromSessionId?,toSessionId?,project,kind,body,idempotencyKey,replyTo?,ownerRelay?} -> {message}; kind NOTE|HANDOFF|QUESTION|ANSWER. Agent must own fromSessionId; recipient must be in same project. toSessionId omitted sends an owner QUESTION only; owner may send without fromSessionId. Messages target one session; owner reads all, agents read only their own principal's sent/received messages. Different authorized projects are not interchangeable. Messages between active enrolled principals are delivered automatically after atomic session/principal/project custody checks. For schema compatibility reviewState is APPROVED (delivery authorized by enrollment); reviewedAt is null and does not claim human review. Historical PENDING/REJECTED bodies remain hidden from agent views. Agent QUESTIONS without a recipient session remain exclusively in the human owner inbox and are never delivered to agents. Body<=6000 chars. Exact retry with same sender+idempotencyKey returns same message; changing content returns409. replyTo references visible message with reversed sender/recipient and same project; an ordinary answer to an owner question originates from owner role; the explicit coordinator ownerRelay exception is documented below. Server IDs numeric; agent delivery cursors are separately increasing.
 GET /api/messages?sessionId=uuid&kind=NOTE&after=number -> {messages,nextCursor,nextBefore}; ascending up to100. sessionId and kind are optional; kind accepts NOTE|HANDOFF|QUESTION|ANSWER and filters before pagination. Omitting sessionId returns all permitted messages. Owner reads all; agents read only APPROVED messages sent or received by their principal, including when filtering by another session in an authorized project. Pending/rejected agent text and questions addressed only to the human owner are excluded even for the sender principal. `reviewState=PENDING|APPROVED|REJECTED` is an owner-only filter. Owner cursors follow message IDs; agent cursors follow delivery sequence, including `before`. Always use `nextCursor`/`nextBefore` returned for the authenticated view. Selecting a session does not grant access to its other conversations. For human inboxes, latest=1 returns newest100 in ascending order; before=ID returns previous100 in ascending order with nextBefore=oldestID when another full page may exist. Do not mix before/latest with a nonzero after. Message fields id,fromSessionId,toSessionId,fromPrincipalName,toPrincipalName,project,kind,body,createdAt,acknowledgedAt,replyTo,reviewState,reviewedAt,deliveryCursor. The owner view also includes payloadHash. Acknowledgment is receipt of coordination, never a data-write approval.
 The former POST /api/messages/:id/review endpoint is removed (404). Enrollment controls coordination access; no message can grant human approval.
 POST /api/messages/:id/ack {sessionId?} -> {message}; recipient principal and exact receiving session only; owner QUESTIONS can be acknowledged by owner withoutsessionId. Agent cannot acknowledge someone else's receipt.
@@ -118,3 +118,41 @@ never stored in connection events.
 fetches history only through its refresh and older-page controls. Records remain
 for 90 days, including after invite revocation. No history before this feature's
 rollout is inferred or fabricated.
+
+
+## Project coordinators and delegated owner answers
+
+Owners may enroll `profile:"coordinator"`, or PATCH `/api/principals/:id`
+with `{profile:"agent"|"observer"|"coordinator"}`. The update preserves the
+existing token, principal identity, projects and session history. Only active
+invitations can change; owner and workspace service identities are immutable.
+Migration 0009 adds coordinator authority with a default of zero, preserving
+existing permissions. A coordinator has project conversation visibility,
+including owner questions, and can send from its own live session and acknowledge
+its own delivered inbox. It cannot administer access, claim/release ownership,
+acknowledge the human owner's inbox, or modify another principal's sessions.
+
+To relay an answer that the human owner actually supplied for an exact question,
+POST `/api/messages` with kind `ANSWER`, the coordinator's `fromSessionId`, the
+question's original asking session as `toSessionId`, matching project, `replyTo`
+question ID, stable `idempotencyKey`, unchanged human `body` (maximum 6000
+characters), and `ownerRelay:{ownerProvided:true,sourceReference:"human answer reference"}`.
+The source reference is nonempty and at most 500 characters; keep secrets,
+customer rows and full approval packets out of both fields. The question must
+have kind QUESTION, owner recipient, no recipient session, and must not be
+REJECTED. Its original asking session and both enrolled principals must remain
+active and in scope. No source question, receipt, review state or delivery cursor
+is changed. The new ANSWER is delivered as the authenticated coordinator, never
+as the owner; it carries `ownerRelay:{source:"delegate-reported",sourceReference}`
+in full and compact views and write receipts. The original author may reply to
+the coordinator normally. Changed text or source reference conflicts on an
+idempotency-key retry. Permission downgrade/revocation is checked at the final
+send/ack mutation and before returning conversation reads.
+
+`ownerProvided` and the source reference are delegate assertions, not independent
+proof that a human approved the content or an external operation. The assistant
+must obtain the answer directly from the human, copy it faithfully and preserve
+scope. Receiving agents retain their own approval requirements and verify any
+consequential authorization through their trusted human channel. A coordinator
+may send ordinary coordination messages under standing human authorization;
+that authorization never permits it to invent human decisions.
