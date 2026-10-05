@@ -121,7 +121,7 @@ export async function readJsonStdin(stdin = process.stdin) {
 }
 
 function usage() {
-  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--direction incoming|all --kind KIND --limit N --view compact|full] | conversations [after] [--project PROJECT --session-id ID --kind KIND --review-state STATE --before N --latest --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
+  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--direction incoming|all --kind KIND --limit N --view compact|full] | limits [SESSION_ID] | merge SOURCE_SESSION_ID < JSON | conversations [after] [--project PROJECT --session-id ID --kind KIND --review-state STATE --before N --latest --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
@@ -205,6 +205,15 @@ async function runCliRaw(argv, env) {
       if (userAuthorized !== true)
         throw new HubClientError('USER_AUTHORIZATION_REQUIRED', 'Send requires human authorization covering this message (including standing recipient/task authorization) and userAuthorized:true in JSON stdin.');
       return client.request('POST', '/api/messages', { body });
+    }
+    case 'limits':
+      if(args.length>1)break;
+      return client.request('GET','/api/limits',{query:{sessionId:args[0]}});
+    case 'merge': {
+      if(args.length!==1||!args[0])break;
+      const {userAuthorized,...body}=await readJsonStdin();
+      if(userAuthorized!==true)throw new HubClientError('USER_AUTHORIZATION_REQUIRED','Merging registrations requires direct human authorization and userAuthorized:true.');
+      return client.request('POST',`/api/sessions/${encodeURIComponent(args[0])}/merge`,{body});
     }
     case 'ack': {
       if (args.length < 1 || args.length > 2 || !/^[1-9]\d*$/u.test(args[0] ?? '')) break;

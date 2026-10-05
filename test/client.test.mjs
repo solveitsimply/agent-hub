@@ -386,6 +386,23 @@ test('MCP metrics record one explicit call without logging payloads or changing 
   assert.equal(JSON.parse(text).total.calls,1);assert.equal(JSON.parse(text).total.emptyInboxes,1);
 });
 
+test('CLI and MCP expose exact message limits and require authorized duplicate merges',async t=>{
+  const requests=[],limits={limits:{sessionDaily:500},day:'2026-01-01',resetAt:'2026-01-02T00:00:00.000Z',usage:{session:500}};
+  const url=await localServer(t,async(request,response)=>{
+    let raw='';for await(const chunk of request)raw+=chunk;
+    requests.push({method:request.method,url:request.url,body:raw?JSON.parse(raw):undefined});
+    response.writeHead(200,{'content-type':'application/json'});response.end(JSON.stringify(request.method==='GET'?limits:{merge:{sourceSessionId:'old',canonicalSessionId:'current'}}));
+  });
+  const read=await runCli(['limits','current'],{url});assert.equal(read.code,0);assert.deepEqual(JSON.parse(read.stdout),limits);
+  assert.equal((await runCli(['merge','old'],{url,input:JSON.stringify({targetSessionId:'current'})})).code,1);assert.equal(requests.length,1);
+  const merged=await runCli(['merge','old'],{url,input:JSON.stringify({targetSessionId:'current',userAuthorized:true})});assert.equal(merged.code,0);assert.deepEqual(requests[1].body,{targetSessionId:'current'});
+  const bridge=startBridge(url);t.after(()=>bridge.child.kill());
+  bridge.send({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'hub_read_message_limits',arguments:{sessionId:'current'}}});
+  const receipt=JSON.parse(await bridge.next());assert.deepEqual(JSON.parse(receipt.result.content.find(item=>item.type==='text'&&item.text.trim().startsWith('{')).text),limits);
+  bridge.send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'hub_merge_sessions',arguments:{sourceSessionId:'old',targetSessionId:'current'}}});assert.equal(JSON.parse(await bridge.next()).result.isError,true);assert.equal(requests.length,3);
+  bridge.send({jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'hub_merge_sessions',arguments:{sourceSessionId:'old',targetSessionId:'current',userAuthorized:true}}});assert.ok(JSON.parse(await bridge.next()).result);assert.deepEqual(requests[3].body,{targetSessionId:'current'});assert.equal(requests[3].url,'/api/sessions/old/merge');
+  const closed=once(bridge.child,'close');bridge.child.stdin.end();await closed;
+});
 
 test('CLI/MCP coordinator reads keep message-ID cursors and relay provenance through the bridge',async t=>{
   const requests=[],ownerRelay={ownerProvided:true,sourceReference:'Human turn 7 for question 41'};

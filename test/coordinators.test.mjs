@@ -146,3 +146,13 @@ test('schema 0008 still serves existing agents and observers; migration preserve
   assert.equal(f.DB.database.prepare('SELECT owner_relay_reference FROM messages WHERE id=?').get(question.id).owner_relay_reference,null);
   assert.throws(()=>f.DB.database.prepare('UPDATE principals SET coordinator_access=2 WHERE id=?').run(a.principal.id));
 });
+
+test('owner answer relays preserve question custody and old-ID retries after duplicate merge',async t=>{
+  const x=await setup(t),{f}=x,target=crypto.randomUUID();
+  f.DB.database.prepare("INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,created_at,last_seen_at) SELECT ?,principal_id,'codex:'||external_id,machine,label,project,task,status,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z' FROM sessions WHERE id=?").run(target,x.asking.id);
+  const before=custody(f,x.question.id);assert.equal((await f.call(x.asker.token,'/api/sessions/'+x.asking.id+'/merge',{targetSessionId:target})).status,200);
+  const body=relay(x),sent=await f.call(x.coordinator.token,'/api/messages',body);assert.equal(sent.status,201,JSON.stringify(sent.body));assert.equal(sent.body.message.toSessionId,target);assert.equal(sent.body.message.body,body.body);
+  assert.deepEqual(custody(f,x.question.id),before);
+  assert.equal((await f.call(x.coordinator.token,'/api/messages',body)).body.message.id,sent.body.message.id);
+  const inbox=await f.call(x.asker.token,'/api/messages?sessionId='+target+'&direction=incoming');assert.equal(inbox.body.messages[0].id,sent.body.message.id);
+});

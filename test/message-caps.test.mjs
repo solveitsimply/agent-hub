@@ -5,7 +5,7 @@ import {SqliteD1} from './d1-sqlite.mjs';
 
 const OWNER='synthetic-owner-for-local-test-only-1234567890';
 function fixture(t,settings={}){
- const DB=new SqliteD1();t.after(()=>DB.close());const env={DB,OWNER_TOKEN:OWNER,...settings};return {
+ const DB=new SqliteD1(':memory:',{throughMigration:'0009'});t.after(()=>DB.close());const env={DB,OWNER_TOKEN:OWNER,...settings};return {
   DB,env,
   async call(token,path,body,method=body===undefined?'GET':'POST'){
    const headers={};if(token)headers.authorization='Bearer '+token;if(body!==undefined)headers['content-type']='application/json';
@@ -34,7 +34,7 @@ function ownerNote(f,session,key,body=`Synthetic owner note ${key}`){
  return f.call(OWNER,'/api/messages',{toSessionId:session.id,project:'release-wave',kind:'NOTE',body,idempotencyKey:key});
 }
 
-test('the default retained sender cap stays at 1000 when no environment setting is present',async t=>{
+test('legacy schema: the default retained sender cap stays at 1000 when no environment setting is present',async t=>{
  const f=fixture(t),to=await recipient(f);seedOwnerMessages(f,to.session,1000,'2020-01-01T00:00:00.000Z');
  const result=await ownerNote(f,to.session,'default-boundary');
  assert.equal(result.status,409);assert.equal(result.body.error.code,'MESSAGE_CAPACITY');
