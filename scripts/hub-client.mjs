@@ -121,7 +121,7 @@ export async function readJsonStdin(stdin = process.stdin) {
 }
 
 function usage() {
-  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--kind KIND --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
+  return 'Usage: hub-client.mjs context [DIRECTORY] | me | sessions [project] [--agent-name APP --agent-model MODEL --machine HOST --repository REPO --branch BRANCH --environment ENV --status STATUS --attention CATEGORY --limit N --view compact|full] | register < JSON | update SESSION_ID < JSON | lifecycle SESSION_ID | checkpoint SESSION_ID < JSON | closeout SESSION_ID < JSON | heartbeat SESSION_ID | archive SESSION_ID | attribution SESSION_ID < JSON | attribution-history SESSION_ID [after] | inbox SESSION_ID [after] [--direction incoming|all --kind KIND --limit N --view compact|full] | send < JSON | ack MESSAGE_ID [SESSION_ID] | claim < JSON | release < JSON | ownership [project] [resourceKey]';
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
@@ -181,14 +181,15 @@ async function runCliRaw(argv, env) {
       return client.request('GET', `/api/sessions/${encodeURIComponent(args[0])}/attribution`, { query: { after } });
     }
     case 'inbox': {
-      const {options,positional}=cliOptions(args,['kind']);
+      const {options,positional}=cliOptions(args,['kind','direction']);
       if(positional.length<1||positional.length>2||!positional[0]) throw new HubClientError('USAGE',usage());
       options.sessionId=positional[0];
       if(positional[1]!==undefined) {
         if(!/^(0|[1-9]\d*)$/u.test(positional[1])) throw new HubClientError('USAGE','after must be a nonnegative integer.');
         options.after=Number(positional[1]);
       }
-      return client.request('GET','/api/messages',{query:readQuery(options,['sessionId','after','kind'],[],100)});
+      options.direction??='incoming';
+      return client.request('GET','/api/messages',{query:readQuery(options,['sessionId','after','kind','direction'],[],100)});
     }
     case 'send': {
       if (args.length) break;

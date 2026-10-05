@@ -55,6 +55,50 @@ The bridge uses newline-delimited JSON-RPC over stdio and exposes `hub_register_
 
 ## Low-token coordination
 
+Agent inbox reads default to **incoming** messages. Sent bodies are already
+known to their author; returning them again consumes context without delivering
+new information. Use `direction:"all"` in MCP or `--direction all` in the CLI
+for explicit conversation history. Direct HTTP/dashboard defaults remain both
+directions. Keep cursors separately for each session, direction and kind. On a
+normal reconnect, an existing all-direction cursor can safely seed an incoming
+cursor: earlier incoming messages were included in that prior view. Never
+silently advance a cursor, hide an unread message, or suppress a read using
+cached data. Bodies, custody checks and acknowledgment semantics stay intact.
+
+An empty inbox is not a reason to repeatedly check while a model waits. Use the
+host's native event wait where available, or the next meaningful work boundary.
+Only write changed status, next action, wait or context. A checkpoint is useful
+coordination, not a per-tool progress log. Its receipt already supplies the next
+revision; read lifecycle only when needed or after a revision conflict.
+
+### Optional local footprint counters
+
+Set `HUB_METRICS_DIR` in the MCP process environment to an absolute, private
+directory (0700). The AWS launcher forwards this single setting to its child,
+without forwarding additional secrets. Disabled by default, the counters issue
+no requests and have no timer. Each bridge overwrites one bounded JSON snapshot
+at most once per minute during explicit tool calls and flushes at clean exit.
+They record calls/errors, argument/response character counts, response bytes,
+duration, empty inboxes and identical reads within sixty seconds. Per-session
+buckets use SHA-256 hashes of Hub UUIDs; directory failures disable storage
+without altering coordination. Snapshot files are 0600. No arguments, bodies,
+credentials, account/model labels or raw session IDs are recorded. Existing
+bridges pick up settings only at a normal reconnect; never interrupt active work.
+
+For a manual report, run:
+
+```sh
+node /absolute/path/to/agent-hub/scripts/summarize-call-metrics.mjs /private/metrics-directory
+```
+
+These counters measure Hub calls and context volume, **not billable tokens**.
+Tool schemas may be loaded differently by different hosts, and provider caching,
+reasoning and output billing cannot be allocated to a Hub call from response
+size alone. Use provider evidence for actual spend. Read the report only when
+reviewing efficiency; do not schedule an AI agent to poll it. The directory is
+local operator evidence: keep only the needed comparison window and remove old
+snapshots during ordinary local housekeeping.
+
 MCP and CLI default to compact session/inbox reads (20 records) and small write receipts. Set `view:"full"` in MCP or `--view full` in the CLI when you need full details. Direct HTTP and the dashboard retain their existing full default; request `view=compact` explicitly. Lifecycle and attribution history reads preserve full evidence. Message bodies are never truncated. JSON character savings vary by content and are not exact model-token or billing measurements.
 
 `hub_list_sessions` accepts the same dashboard filters: `project`, `agentName` (latest reported app/client), `agentModel`, `machine`, `repository`, repository-qualified `branch`, `environment`, `status`, `attention`, and `staleOnly:true`. Name/model/machine/environment/repository/branch accept a corresponding `...Unknown:true` flag, mutually exclusive with a known value. Unknown environment uses `environmentUnknown:true`, not null. Filters apply before the record limit. Labels are untrusted reporting claims. `limit` accepts 1–200 for sessions and 1–100 for inboxes. Compact discovery returns `{sessions,limit,total,hasMore}` without dashboard facets, counts or full lifecycle evidence. If `hasMore` is true, narrow filters or raise the limit; session discovery does not have a stable pagination cursor.

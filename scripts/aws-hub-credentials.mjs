@@ -133,7 +133,7 @@ export function resolveHubCredentials({ profile = DEFAULT_AWS_PROFILE, region = 
 
 function safeChildEnvironment(credentials, env) {
   const child = {};
-  for (const key of ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'WINDIR']) {
+  for (const key of ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'WINDIR','HUB_METRICS_DIR']) {
     if (env[key]) child[key] = env[key];
   }
   child.HUB_URL = credentials.hubUrl;

@@ -16,6 +16,7 @@ export function readQuery(args, names, flags = [], maximum = 200) {
     if (key === 'after') {
       if (!Number.isSafeInteger(args[key]) || args[key] < 0) throw new HubClientError('INVALID_ARGUMENT','after must be a nonnegative integer.');
     } else if (typeof args[key] !== 'string' || !args[key].trim()) throw new HubClientError('INVALID_ARGUMENT', `${key} must be a nonempty string.`);
+    if (key === 'direction' && !['incoming','all'].includes(args[key])) throw new HubClientError('INVALID_ARGUMENT','direction must be incoming or all.');
     query[key] = args[key];
   }
   for (const key of flags) if (args[key] !== undefined) {
