@@ -4,7 +4,11 @@ The existing stdio bridge is unchanged. This optional transport connects a remot
 MCP host to the existing Hub Worker over authenticated Streamable HTTP. It reuses
 the Hub's API and invitation/session/project checks rather than storing or
 forwarding an invitation token to another service. It requires migration 0011.
-It is disabled until explicitly configured. All `/mcp` requests, including
+It is disabled until a canonical MCP_ORIGIN is configured. With no registered
+OAuth clients, public discovery metadata is available and `/mcp` returns an
+OAuth challenge, but no grants or data access are possible. This allows a host
+to display its exact callback before the operator adds a redirect allowlist.
+All `/mcp` requests, including
 initialization and discovery, require an OAuth access token. Public metadata and
 the browser consent entry point contain no coordination records.
 
@@ -69,7 +73,9 @@ Example non-secret private Worker variables:
 }
 ```
 
-Register a public OAuth client with exact HTTPS redirect URIs. Wildcards,
+An absent MCP_OAUTH_CLIENTS_JSON defaults to an empty client list for safe
+discovery bootstrap. Explicit malformed configuration fails closed. Register a
+public OAuth client with exact HTTPS redirect URIs. Wildcards,
 implicit flows, client credentials, dynamic registration and CIMD are not
 implemented. Copy the actual callback from the host's MCP connection settings;
 do not guess it. Each selected redirect must be trusted by the operator.
@@ -135,6 +141,8 @@ a production message simply to test installation without message authorization.
   Revocation is idempotent. Do not assume a host disconnect invokes revocation
   without verifying the host's behavior. Revoking or rotating the underlying
   Coordinator invitation invalidates all of its existing grants as well.
+  Removing client configuration suspends access; reintroducing the same client
+  can restore unexpired grants. Revoke a grant explicitly to end it permanently.
 - Removing project access, changing the profile, archiving or merging the exact
   bound session also invalidates the grant. No grant follows a merged alias or
   silently broadens to a replacement session.

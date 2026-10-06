@@ -202,3 +202,22 @@ test('expired unexchanged consent does not trap grant capacity for a week',async
   f.DB.database.prepare("UPDATE mcp_oauth_tokens SET expires_at=1 WHERE kind='code'").run();
   const tokens=await f.connect();assert.equal((await f.rpc(tokens.access_token,'tools/list')).status,200);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_grants').get().n,1);
 });
+
+test('empty-client bootstrap exposes metadata and an OAuth challenge but never tools or data',async t=>{
+  const f=await fixture(t);for(const setting of [undefined,'[]']){
+    if(setting===undefined)delete f.env.MCP_OAUTH_CLIENTS_JSON;else f.env.MCP_OAUTH_CLIENTS_JSON=setting;
+    const metadata=await f.request('/.well-known/oauth-protected-resource/mcp');assert.equal(metadata.status,200);assert.equal((await metadata.json()).resource,RESOURCE);
+    for(const method of ['initialize','tools/list','tools/call']){const r=await f.rpc(f.actor.token,method);assert.equal(r.status,401);assert.match(r.headers.get('www-authenticate'),/hub:read hub:message/);}
+    const b=await f.begin();assert.equal(b.r.status,400);assert.equal(b.cookie,undefined);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_requests').get().n,0);
+  }
+});
+
+test('client removal suspends existing access, refresh and pending consent without broadening access',async t=>{
+  const f=await fixture(t),tokens=await f.connect(),b=await f.begin();await f.review(b);const config=f.env.MCP_OAUTH_CLIENTS_JSON;delete f.env.MCP_OAUTH_CLIENTS_JSON;
+  assert.equal((await f.rpc(tokens.access_token,'tools/list')).status,401);assert.equal((await refresh(f,tokens)).status,400);assert.equal((await f.approve(b)).status,400);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_grants').get().n,1);
+  f.env.MCP_OAUTH_CLIENTS_JSON=config;assert.equal((await f.rpc(tokens.access_token,'tools/list')).status,200);
+});
+
+test('bootstrap defaults only missing client config and keeps malformed configuration closed',async t=>{
+  const f=await fixture(t);for(const config of ['', 'null', '{}', '[null]', '[{}]', 'not-json']){f.env.MCP_OAUTH_CLIENTS_JSON=config;assert.equal((await f.request('/.well-known/oauth-authorization-server')).status,503,config);}
+});

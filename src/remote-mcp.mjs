@@ -32,10 +32,11 @@ export async function checkMcpGrant(db,id,accessTokenHash=null){
   if(!row)deny('invalid_token','The connection expired or its authority changed. Reconnect.',401);return row;
 }
 function config(env,url){
-  if(!env.MCP_ORIGIN||!env.MCP_OAUTH_CLIENTS_JSON)deny('temporarily_unavailable','Remote MCP is not configured.',503);
-  let origin,clients;try{origin=new URL(env.MCP_ORIGIN);clients=JSON.parse(env.MCP_OAUTH_CLIENTS_JSON);}catch{deny('temporarily_unavailable','Remote MCP configuration is invalid.',503);}
-  if(origin.protocol!=='https:'||origin.href!==origin.origin+'/'||url.origin!==origin.origin||!Array.isArray(clients)||clients.length<1||clients.length>10)deny('temporarily_unavailable','Remote MCP configuration is invalid.',503);
+  if(!env.MCP_ORIGIN)deny('temporarily_unavailable','Remote MCP is not configured.',503);
+  let origin,clients;try{origin=new URL(env.MCP_ORIGIN);clients=env.MCP_OAUTH_CLIENTS_JSON===undefined?[]:JSON.parse(env.MCP_OAUTH_CLIENTS_JSON);}catch{deny('temporarily_unavailable','Remote MCP configuration is invalid.',503);}
+  if(origin.protocol!=='https:'||origin.href!==origin.origin+'/'||url.origin!==origin.origin||!Array.isArray(clients)||clients.length>10)deny('temporarily_unavailable','Remote MCP configuration is invalid.',503);
   for(const client of clients){
+    if(!client||typeof client!=='object'||Array.isArray(client))deny('temporarily_unavailable','OAuth client configuration is invalid.',503);
     if(typeof client.client_id!=='string'||!/^[a-zA-Z0-9._-]{1,120}$/.test(client.client_id)||typeof client.client_name!=='string'||client.client_name.length>120||!Array.isArray(client.redirect_uris)||!client.redirect_uris.length||client.redirect_uris.length>10)deny('temporarily_unavailable','OAuth client configuration is invalid.',503);
     for(const uri of client.redirect_uris){let parsed;try{parsed=new URL(uri);}catch{deny('temporarily_unavailable','OAuth redirect configuration is invalid.',503);}if(parsed.protocol!=='https:'||parsed.hash||parsed.username||parsed.password)deny('temporarily_unavailable','OAuth redirects must be exact HTTPS URLs.',503);}
   }
@@ -176,6 +177,7 @@ function validate(value,s){
   else if(s.type==='boolean'&&typeof value!=='boolean')deny('invalid_request','Invalid boolean argument.');
 }
 async function protectedGrant(c,request,db){
+  if(c.clients.length===0)deny('invalid_token','No OAuth client is registered. Configure the exact client and redirect before connecting.',401);
   const bearer=request.headers.get('authorization');if(!/^Bearer [A-Za-z0-9_-]{43}$/.test(bearer??''))deny('invalid_token','Connect this plugin with OAuth.',401);
   const token=await db.prepare("SELECT * FROM mcp_oauth_tokens WHERE token_hash=? AND kind='access' AND expires_at>?").bind(await hash(bearer.slice(7)),seconds()).first();
   if(!token)deny('invalid_token','The access token expired or is invalid.',401);
