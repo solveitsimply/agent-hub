@@ -266,3 +266,21 @@ test('extension compatibility never relaxes consent-form or MCP tool argument va
   assert.equal(f.DB.database.prepare('SELECT principal_id FROM mcp_oauth_requests').get().principal_id,null);
   const tokens=await f.connect(),result=await f.call(tokens.access_token,'hub_read_inbox',{unknown_extension:'synthetic'});assert.equal(result.body.error.code,-32602);
 });
+
+test('consent HTML uses strict-origin while token, metadata and redirect responses stay no-referrer',async t=>{
+  const f=await fixture(t),b=await f.begin();assert.equal(b.r.headers.get('referrer-policy'),'strict-origin');assert.match(b.r.headers.get('content-security-policy'),/frame-ancestors 'none'/);assert.match(b.r.headers.get('content-security-policy'),/form-action 'self'/);
+  let r=await f.review(b);assert.equal(r.status,200);assert.equal(r.headers.get('referrer-policy'),'strict-origin');assert.match(r.headers.get('content-security-policy'),/frame-ancestors 'none'/);
+  r=await f.approve(b);assert.equal(r.status,303);assert.equal(r.headers.get('referrer-policy'),'no-referrer');const code=new URL(r.headers.get('location')).searchParams.get('code');r=await f.exchange(code);assert.equal(r.status,200);assert.equal(r.headers.get('referrer-policy'),'no-referrer');
+  r=await f.request('/.well-known/oauth-authorization-server');assert.equal(r.headers.get('referrer-policy'),'no-referrer');
+});
+
+test('consent keeps exact Origin and browser CSRF requirements, including rejection of null Origin',async t=>{
+  const f=await fixture(t),b=await f.begin();const form={action:'review',request_id:b.request_id,invitation:f.actor.token,session_id:f.own.id,project:'alpha'};
+  for(const origin of ['null','https://evil.test','https://hub.test.evil.test']){const r=await f.postForm('/oauth/authorize',form,{origin,cookie:b.cookie});assert.equal(r.status,403);assert.equal(r.headers.get('referrer-policy'),'no-referrer');}
+  assert.equal((await f.postForm('/oauth/authorize',form,{cookie:b.cookie})).status,403);
+  assert.equal((await f.postForm('/oauth/authorize',form,{origin:ORIGIN})).status,403);
+  assert.equal((await f.review(b)).status,200);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_grants').get().n,0);
+  const selected=f.DB.database.prepare('SELECT * FROM mcp_oauth_requests').get();
+  for(const action of ['approve','deny'])for(const origin of ['null','https://evil.test','http://hub.test','https://hub.test:444']){assert.equal((await f.postForm('/oauth/authorize',{action,request_id:b.request_id},{origin,cookie:b.cookie})).status,403);assert.deepEqual(f.DB.database.prepare('SELECT * FROM mcp_oauth_requests').get(),selected);}
+  assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_grants').get().n,0);assert.equal((await f.approve(b)).status,303);
+});

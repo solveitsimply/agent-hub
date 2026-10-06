@@ -23,7 +23,9 @@ try{
       if(url.origin==='https://client.test'){assert.equal(url.pathname,'/callback');return route.fulfill({status:200,contentType:'text/html',body:'<!doctype html><h1>Synthetic OAuth callback received</h1>'});}
       assert.equal(url.origin,origin,'No real external connections are permitted');
       if(url.pathname==='/oauth-style.css')return route.fulfill({status:200,contentType:'text/css',body:await readFile(new URL('../public/oauth-style.css',import.meta.url),'utf8')});
-      const response=await worker.fetch(new Request(url,{method:request.method(),headers:await request.allHeaders(),...(['GET','HEAD'].includes(request.method())?{}:{body:request.postDataBuffer()})}),env);
+      const requestHeaders=await request.allHeaders();
+      if(url.pathname==='/oauth/authorize'&&request.method()==='POST')assert.equal(requestHeaders.origin,origin,'Consent form must retain its exact Origin');
+      const response=await worker.fetch(new Request(url,{method:request.method(),headers:requestHeaders,...(['GET','HEAD'].includes(request.method())?{}:{body:request.postDataBuffer()})}),env);
       await route.fulfill({status:response.status,headers:Object.fromEntries(response.headers),body:Buffer.from(await response.arrayBuffer())});
     });
     const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));

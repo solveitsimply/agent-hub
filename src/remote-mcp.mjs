@@ -14,7 +14,9 @@ const json=(body,status=200,extra={})=>Response.json(body,{status,headers:{...se
 class OAuthError extends Error {constructor(error,message,status=400){super(message);this.error=error;this.status=status;}}
 const deny=(error,message,status=400)=>{throw new OAuthError(error,message,status);};
 const escape=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const html=(body,cookie,callback=null)=>new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Hub connection</title><link rel="stylesheet" href="/oauth-style.css"><main>'+body+'</main></html>',{headers:{...securityHeaders,'Content-Type':'text/html; charset=utf-8',...(callback?{'Content-Security-Policy':securityHeaders['Content-Security-Policy'].replace("form-action 'self'","form-action 'self' "+new URL(callback).origin)}:{}),...(cookie?{'Set-Cookie':cookie}:{})}});
+// A no-referrer document makes browser form POST Origin null (Fetch §3.2).
+// Keep only the origin as referrer on consent pages; JSON/redirects stay private.
+const html=(body,cookie,callback=null)=>new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Hub connection</title><link rel="stylesheet" href="/oauth-style.css"><main>'+body+'</main></html>',{headers:{...securityHeaders,'Content-Type':'text/html; charset=utf-8','Referrer-Policy':'strict-origin',...(callback?{'Content-Security-Policy':securityHeaders['Content-Security-Policy'].replace("form-action 'self'","form-action 'self' "+new URL(callback).origin)}:{}),...(cookie?{'Set-Cookie':cookie}:{})}});
 const cookieName='__Host-hub_mcp_consent';
 const cookie=(value,maxAge=600)=>`${cookieName}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 export const isRemoteMcpPath=path=>path==='/mcp'||path.startsWith('/oauth/')||path.startsWith('/.well-known/oauth-');
