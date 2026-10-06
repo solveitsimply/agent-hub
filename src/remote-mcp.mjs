@@ -54,7 +54,10 @@ const form=async request=>unique(new URLSearchParams(await readBody(request,'app
 function keys(value,allowed){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!allowed.includes(key)))deny('invalid_request','Unsupported argument.');}
 function clientFor(c,id){const client=c.clients.find(x=>x.client_id===id);if(!client)deny('invalid_client','Unknown OAuth client.');return client;}
 function paramsFor(c,url){
-  const p=unique(url.searchParams);keys(p,['response_type','client_id','redirect_uri','resource','scope','state','code_challenge','code_challenge_method']);
+  // OAuth extensions are ignored, never reflected, persisted or used as authority.
+  const raw=unique(url.searchParams);
+  const recognized=['response_type','client_id','redirect_uri','resource','scope','state','code_challenge','code_challenge_method'];
+  const p=Object.fromEntries(Object.entries(raw).filter(([name])=>recognized.includes(name)));
   const client=clientFor(c,p.client_id);
   if(!client.redirect_uris.includes(p.redirect_uri))deny('invalid_request','Redirect URI is not registered.');
   if(p.response_type!=='code'||p.resource!==c.resource||p.code_challenge_method!=='S256'||!/^[A-Za-z0-9_-]{43}$/.test(p.code_challenge??'')||typeof p.state!=='string'||p.state.length<16||p.state.length>1024)deny('invalid_request','Use authorization code, exact resource, state and S256 PKCE.');
@@ -114,7 +117,12 @@ async function authorize(c,ctx,db){
 }
 async function tokenEndpoint(c,request,db){
   if(request.method!=='POST')deny('invalid_request','Use POST.',405);
-  const f=await form(request);keys(f,['grant_type','client_id','resource','code','redirect_uri','code_verifier','refresh_token','scope']);
+  const rawForm=await form(request);
+  // Client authentication parameters are recognized, but this server supports
+  // public PKCE clients only. Never silently accept a secret/assertion method.
+  if(['client_secret','client_assertion','client_assertion_type'].some(name=>Object.hasOwn(rawForm,name)))deny('invalid_client','This registered client uses public PKCE authentication.');
+  const recognized=['grant_type','client_id','resource','code','redirect_uri','code_verifier','refresh_token','scope'];
+  const f=Object.fromEntries(Object.entries(rawForm).filter(([name])=>recognized.includes(name)));
   clientFor(c,f.client_id);
   if(request.headers.has('authorization'))deny('invalid_client','This registered client uses public PKCE authentication.');
   if(f.resource!==c.resource)deny('invalid_target','Use the exact MCP resource.');

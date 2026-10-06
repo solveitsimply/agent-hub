@@ -221,3 +221,48 @@ test('client removal suspends existing access, refresh and pending consent witho
 test('bootstrap defaults only missing client config and keeps malformed configuration closed',async t=>{
   const f=await fixture(t);for(const config of ['', 'null', '{}', '[null]', '[{}]', 'not-json']){f.env.MCP_OAUTH_CLIENTS_JSON=config;assert.equal((await f.request('/.well-known/oauth-authorization-server')).status,503,config);}
 });
+
+test('OAuth authorization ignores unrecognized extensions without reflecting or persisting them',async t=>{
+  const f=await fixture(t),b=await f.begin({prompt:'consent',access_type:'offline',login_hint:'synthetic@example.test',extension_data:'synthetic-extension-marker',project:'gamma',principal_id:'owner',session_id:f.peerSession.id,invitation:'synthetic-untrusted-extension',action:'approve'});
+  assert.equal(b.r.status,200);assert.ok(!b.body.includes('synthetic-extension-marker'));assert.ok(!b.body.includes('synthetic@example.test'));
+  const row=f.DB.database.prepare('SELECT * FROM mcp_oauth_requests').get();assert.equal(row.scope,'hub:read hub:message');assert.equal(row.project,null);assert.equal(row.principal_id,null);assert.ok(!JSON.stringify(row).includes('synthetic-extension-marker'));
+  assert.equal((await f.review(b)).status,200);assert.equal((await f.approve(b)).status,303);const grant=f.DB.database.prepare('SELECT * FROM mcp_oauth_grants').get();assert.equal(grant.project,'alpha');assert.equal(grant.session_id,f.own.id);assert.equal(grant.principal_id,f.actor.principal.id);
+});
+
+test('OAuth code exchange and refresh ignore extensions while preserving token bindings',async t=>{
+  const f=await fixture(t),{code}=await f.consent({prompt:'consent'});
+  let r=await f.exchange(code,{extension_flag:'enabled',audience:'https://unrelated.test',resource:ORIGIN+'/wrong'});assert.equal(r.status,400);
+  r=await f.exchange(code,{extension_flag:'enabled',audience:'https://unrelated.test'});assert.equal(r.status,200);const tokens=await r.json();
+  r=await refresh(f,tokens,{extension_flag:'enabled',audience:'https://unrelated.test'});assert.equal(r.status,200);const next=await r.json();assert.equal((await f.rpc(next.access_token,'tools/list')).status,200);
+  assert.equal(f.DB.database.prepare('SELECT resource FROM mcp_oauth_grants').get().resource,RESOURCE);
+});
+
+test('known invalid OAuth values remain invalid when extension parameters are present',async t=>{
+  const f=await fixture(t);for(const changes of [{client_id:'other'},{redirect_uri:'https://evil.test/callback'},{resource:'https://other.test/mcp'},{scope:'hub:read owner:admin'},{code_challenge_method:'plain'},{response_type:'token'}])assert.equal((await f.begin({prompt:'consent',...changes})).r.status,400);
+  assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_requests').get().n,0);
+});
+
+test('duplicate OAuth parameters still fail, including unrecognized extensions',async t=>{
+  const f=await fixture(t),b=await f.begin();assert.equal((await f.request('/oauth/authorize?'+new URLSearchParams(b.params)+'&prompt=one&prompt=two')).status,400);
+  const {code}=await f.consent();const params=new URLSearchParams({grant_type:'authorization_code',client_id:CLIENT,resource:RESOURCE,code,redirect_uri:REDIRECT,code_verifier:verifier});
+  assert.equal((await f.postForm('/oauth/token',params.toString()+'&extension=one&extension=two')).status,400);assert.equal((await f.exchange(code)).status,200);
+});
+
+test('unsupported client authentication remains rejected rather than ignored as an extension',async t=>{
+  const f=await fixture(t),{code}=await f.consent();for(const changes of [{client_secret:'synthetic-not-a-secret'},{client_assertion:'synthetic-not-an-assertion'},{client_assertion_type:'unsupported'},{client_secret:''},{client_assertion:''},{client_assertion_type:''}])assert.equal((await f.exchange(code,changes)).status,400);
+  assert.equal((await f.exchange(code)).status,200);
+});
+
+test('request-object extensions cannot replace required security parameters',async t=>{
+  const f=await fixture(t),b=await f.begin();for(const omitted of ['client_id','redirect_uri','resource','code_challenge','code_challenge_method']){
+    const params={...b.params,request:'synthetic-unsigned-request-object',request_uri:'https://unrelated.test/request-object'};delete params[omitted];
+    assert.equal((await f.request('/oauth/authorize?'+new URLSearchParams(params))).status,400,omitted);
+  }
+  assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_requests').get().n,1);
+});
+
+test('extension compatibility never relaxes consent-form or MCP tool argument validation',async t=>{
+  const f=await fixture(t),b=await f.begin();assert.equal((await f.review(b,{unknown_extension:'synthetic'})).status,400);
+  assert.equal(f.DB.database.prepare('SELECT principal_id FROM mcp_oauth_requests').get().principal_id,null);
+  const tokens=await f.connect(),result=await f.call(tokens.access_token,'hub_read_inbox',{unknown_extension:'synthetic'});assert.equal(result.body.error.code,-32602);
+});
