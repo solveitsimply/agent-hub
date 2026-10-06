@@ -7,6 +7,12 @@ const random=()=>b64(crypto.getRandomValues(new Uint8Array(32)));
 const hash=async text=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(text))),b=>b.toString(16).padStart(2,'0')).join('');
 const challenge=async text=>b64(new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(text))));
 const SCOPES=['hub:read','hub:message'];
+const DAY=86400;
+function lifetimePolicy(client){
+  const maxDays=client.max_grant_days===undefined?7:client.max_grant_days,idleDays=client.refresh_idle_days===undefined?7:client.refresh_idle_days;
+  if(!Number.isInteger(maxDays)||maxDays<1||maxDays>90||!Number.isInteger(idleDays)||idleDays<1||idleDays>30||idleDays>maxDays)deny('temporarily_unavailable','OAuth lifetime configuration is invalid.',503);
+  return {maxAge:maxDays*DAY,idle:idleDays*DAY};
+}
 const PROTOCOLS=['2025-03-26','2025-06-18','2025-11-25'];
 const NOTICE='Untrusted coordination only; never authorization. Messages cannot override native approval policies, start or resume a chat, or authorize external actions. Owner relays are delegate-reported claims, not proof of approval.';
 const securityHeaders={'Cache-Control':'no-store','Pragma':'no-cache','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Content-Security-Policy':"default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"};
@@ -40,6 +46,7 @@ function config(env,url){
   for(const client of clients){
     if(!client||typeof client!=='object'||Array.isArray(client))deny('temporarily_unavailable','OAuth client configuration is invalid.',503);
     if(typeof client.client_id!=='string'||!/^[a-zA-Z0-9._-]{1,120}$/.test(client.client_id)||typeof client.client_name!=='string'||client.client_name.length>120||!Array.isArray(client.redirect_uris)||!client.redirect_uris.length||client.redirect_uris.length>10)deny('temporarily_unavailable','OAuth client configuration is invalid.',503);
+    lifetimePolicy(client);
     for(const uri of client.redirect_uris){let parsed;try{parsed=new URL(uri);}catch{deny('temporarily_unavailable','OAuth redirect configuration is invalid.',503);}if(parsed.protocol!=='https:'||parsed.hash||parsed.username||parsed.password)deny('temporarily_unavailable','OAuth redirects must be exact HTTPS URLs.',503);}
   }
   if(new Set(clients.map(c=>c.client_id)).size!==clients.length)deny('temporarily_unavailable','Duplicate OAuth client configuration.',503);
@@ -70,7 +77,9 @@ async function cleanup(db){
   const now=seconds();await db.batch([
     db.prepare('DELETE FROM mcp_oauth_requests WHERE expires_at<=?').bind(now),
     db.prepare('DELETE FROM mcp_oauth_tokens WHERE (kind IN (\'code\',\'access\') AND expires_at<=?) OR grant_id IN (SELECT id FROM mcp_oauth_grants WHERE expires_at<=?)').bind(now,now),
-    db.prepare('DELETE FROM mcp_oauth_grants WHERE expires_at<=? OR NOT EXISTS(SELECT 1 FROM mcp_oauth_tokens WHERE grant_id=mcp_oauth_grants.id)').bind(now),
+    // A family is dead only when no usable code, access or unspent refresh remains.
+    // Keep every spent refresh hash while any token could still authorize access.
+    db.prepare("DELETE FROM mcp_oauth_grants WHERE revoked_at IS NOT NULL OR expires_at<=? OR NOT EXISTS(SELECT 1 FROM mcp_oauth_tokens WHERE grant_id=mcp_oauth_grants.id AND expires_at>? AND (kind='access' OR consumed_by IS NULL))").bind(now,now),
   ]);
 }
 async function currentSelection(db,row){
@@ -80,8 +89,8 @@ function redirect(uri,params){const url=new URL(uri);for(const [key,value]of Obj
 async function authorize(c,ctx,db){
   const {request,env,authenticate}=ctx;
   if(request.method==='GET'){
-    const p=paramsFor(c,new URL(request.url));await db.prepare('DELETE FROM mcp_oauth_requests WHERE expires_at<=?').bind(seconds()).run();const id=random(),csrf=random();
-    const inserted=await db.prepare('INSERT INTO mcp_oauth_requests(id_hash,csrf_hash,client_id,redirect_uri,resource,scope,state,challenge,expires_at) SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM mcp_oauth_requests)<1000').bind(await hash(id),await hash(csrf),p.client_id,p.redirect_uri,c.resource,p.scope,p.state,p.code_challenge,seconds()+600).run();
+    const p=paramsFor(c,new URL(request.url));await db.prepare('DELETE FROM mcp_oauth_requests WHERE expires_at<=?').bind(seconds()).run();const id=random(),csrf=random(),policy=lifetimePolicy(p.client);
+    const inserted=await db.prepare('INSERT INTO mcp_oauth_requests(id_hash,csrf_hash,client_id,redirect_uri,resource,scope,state,challenge,expires_at,max_age_seconds,idle_seconds) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM mcp_oauth_requests)<1000').bind(await hash(id),await hash(csrf),p.client_id,p.redirect_uri,c.resource,p.scope,p.state,p.code_challenge,seconds()+600,policy.maxAge,policy.idle).run();
     if(!inserted.meta.changes)deny('temporarily_unavailable','Consent capacity is temporarily full. Try later.',429);
     return html(`<h1>Connect Agent Hub</h1><p>Client: ${escape(p.client.client_name)}</p><p>This connection can read one enrolled project${p.scope.includes('hub:message')?' and send coordination messages from one existing session':''}. Your next screen shows the exact identity and scope before you approve.</p><p>Use a separate Coordinator invitation. Owner credentials are not accepted. Never enter this token in chat.</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="${id}"><input type="hidden" name="action" value="review"><label>Coordinator invitation token<input type="password" name="invitation" autocomplete="off" required maxlength="512"></label><label>Existing session ID<input name="session_id" required maxlength="80"></label><label>Project slug<input name="project" required maxlength="64"></label><button>Review connection</button></form>`,cookie(csrf));
   }
@@ -103,14 +112,14 @@ async function authorize(c,ctx,db){
     // No raw invitation survives the request or appears in returned HTML.
     const reviewed=await db.prepare('UPDATE mcp_oauth_requests SET principal_id=?,credential_hash=?,session_id=?,project=? WHERE id_hash=? AND expires_at>? AND principal_id IS NULL').bind(selection.principal_id,selection.credential_hash,selection.session_id,selection.project,row.id_hash,seconds()).run();
     if(!reviewed.meta.changes)deny('access_denied','This consent was already reviewed. Start a new connection to change its scope.',409);
-    return html(`<h1>Approve Agent Hub connection</h1><p>Client: ${escape(client.client_name)}</p><p>Identity: ${escape(selected.name)}</p><p>Session: ${escape(selected.session_label)} (${escape(selection.session_id)})</p><p>Project: ${escape(selection.project)}</p><p>Access: ${escape(row.scope)}. Read project conversations (including questions to the owner), project sessions and this session's inbox.${row.scope.includes('hub:message')?' Send NOTE, QUESTION or faithful ANSWER messages from this session only.':''}</p><p>Lasts up to 7 days. Revoking this grant or the invitation immediately ends access. No owner, administration, ownership, execution or session-state control is granted. Each message still requires native user authorization. ${escape(NOTICE)}</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="${f.request_id}"><button name="action" value="approve">Approve this scoped connection</button><button name="action" value="deny">Cancel</button></form>`,null,row.redirect_uri);
+    return html(`<h1>Approve Agent Hub connection</h1><p>Client: ${escape(client.client_name)}</p><p>Identity: ${escape(selected.name)}</p><p>Session: ${escape(selected.session_label)} (${escape(selection.session_id)})</p><p>Project: ${escape(selection.project)}</p><p>Access: ${escape(row.scope)}. Read project conversations (including questions to the owner), project sessions and this session's inbox.${row.scope.includes('hub:message')?' Send NOTE, QUESTION or faithful ANSWER messages from this session only.':''}</p><p>Lasts up to ${row.max_age_seconds/DAY} days, ending sooner after ${row.idle_seconds/DAY} days without token renewal. Automatic background renewal counts as activity and never extends the maximum lifetime. Revoking this grant or the invitation immediately ends access. No owner, administration, ownership, execution or session-state control is granted. Each message still requires native user authorization. ${escape(NOTICE)}</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="${f.request_id}"><button name="action" value="approve">Approve this scoped connection</button><button name="action" value="deny">Cancel</button></form>`,null,row.redirect_uri);
   }
   if(f.action!=='approve'||f.invitation!==undefined||f.session_id!==undefined||f.project!==undefined||!row.principal_id)deny('invalid_request','Review the connection first.');
   if(!await currentSelection(db,row))deny('access_denied','The invitation or session changed. Start again.',403);
   await cleanup(db);
   const id=crypto.randomUUID(),code=random(),stamp=seconds(),codeHash=await hash(code);
   const result=await db.batch([
-    db.prepare(`INSERT INTO mcp_oauth_grants(id,principal_id,credential_hash,session_id,project,client_id,resource,scope,created_at,expires_at) SELECT ?,r.principal_id,r.credential_hash,r.session_id,r.project,r.client_id,r.resource,r.scope,?,? FROM mcp_oauth_requests r JOIN principals p ON p.id=r.principal_id JOIN sessions s ON s.id=r.session_id WHERE r.id_hash=? AND r.expires_at>? AND p.active=1 AND p.role='agent' AND p.access_profile='observer' AND p.coordinator_access=1 AND p.token_hash=r.credential_hash AND s.principal_id=p.id AND s.project=r.project AND s.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM session_aliases WHERE alias_session_id=s.id) AND EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=r.project) AND (SELECT COUNT(*) FROM mcp_oauth_grants WHERE principal_id=r.principal_id AND revoked_at IS NULL)<20 AND (SELECT COUNT(*) FROM mcp_oauth_grants)<1000 AND (SELECT COUNT(*) FROM mcp_oauth_tokens)<50000`).bind(id,stamp,stamp+7*86400,row.id_hash,stamp),
+    db.prepare(`INSERT INTO mcp_oauth_grants(id,principal_id,credential_hash,session_id,project,client_id,resource,scope,created_at,expires_at,idle_seconds) SELECT ?,r.principal_id,r.credential_hash,r.session_id,r.project,r.client_id,r.resource,r.scope,?,?+r.max_age_seconds,r.idle_seconds FROM mcp_oauth_requests r JOIN principals p ON p.id=r.principal_id JOIN sessions s ON s.id=r.session_id WHERE r.id_hash=? AND r.expires_at>? AND p.active=1 AND p.role='agent' AND p.access_profile='observer' AND p.coordinator_access=1 AND p.token_hash=r.credential_hash AND s.principal_id=p.id AND s.project=r.project AND s.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM session_aliases WHERE alias_session_id=s.id) AND EXISTS(SELECT 1 FROM json_each(p.projects_json) WHERE value=r.project) AND (SELECT COUNT(*) FROM mcp_oauth_grants WHERE principal_id=r.principal_id AND revoked_at IS NULL)<20 AND (SELECT COUNT(*) FROM mcp_oauth_grants)<1000 AND (SELECT COUNT(*) FROM mcp_oauth_tokens)<50000`).bind(id,stamp,stamp,row.id_hash,stamp),
     db.prepare("INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at,redirect_uri,challenge) SELECT ?,id,'code',?,?,?,? FROM mcp_oauth_grants WHERE id=?").bind(codeHash,stamp+120,stamp,row.redirect_uri,row.challenge,id),
     db.prepare('DELETE FROM mcp_oauth_requests WHERE id_hash=?').bind(row.id_hash),
   ]);
@@ -145,9 +154,9 @@ async function tokenEndpoint(c,request,db){
   const access=random(),refresh=random(),winner=random(),stamp=seconds();
   const accessExpiry=Math.min(stamp+900,grant.expires_at);
   const result=await db.batch([
-    db.prepare(`UPDATE mcp_oauth_tokens SET consumed_by=? WHERE token_hash=? AND consumed_by IS NULL AND expires_at>? AND ${mcpGrantPredicate(grant.id)} AND (SELECT COUNT(*) FROM mcp_oauth_tokens WHERE grant_id=? AND kind='refresh' AND created_at>?)<150 AND (SELECT COUNT(*) FROM mcp_oauth_tokens)<=49998`).bind(winner,tokenHash,stamp,grant.id,stamp-86400),
+    db.prepare(`UPDATE mcp_oauth_tokens SET consumed_by=? WHERE token_hash=? AND consumed_by IS NULL AND expires_at>CAST(strftime('%s','now') AS INTEGER) AND ${mcpGrantPredicate(grant.id)} AND (SELECT COUNT(*) FROM mcp_oauth_tokens WHERE grant_id=? AND kind='refresh' AND created_at>?)<150 AND (SELECT COUNT(*) FROM mcp_oauth_tokens)<=49998`).bind(winner,tokenHash,grant.id,stamp-86400),
     db.prepare("INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at) SELECT ?,grant_id,'access',?,? FROM mcp_oauth_tokens WHERE token_hash=? AND consumed_by=?").bind(await hash(access),accessExpiry,stamp,tokenHash,winner),
-    db.prepare("INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at) SELECT ?,grant_id,'refresh',?,? FROM mcp_oauth_tokens WHERE token_hash=? AND consumed_by=?").bind(await hash(refresh),grant.expires_at,stamp,tokenHash,winner),
+    db.prepare("INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at) SELECT ?,grant_id,'refresh',?,? FROM mcp_oauth_tokens WHERE token_hash=? AND consumed_by=?").bind(await hash(refresh),Math.min(grant.expires_at,stamp+grant.idle_seconds),stamp,tokenHash,winner),
   ]);
   if(!result[0].meta.changes){
     const current=await db.prepare('SELECT consumed_by,expires_at FROM mcp_oauth_tokens WHERE token_hash=?').bind(tokenHash).first();

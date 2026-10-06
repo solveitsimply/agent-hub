@@ -58,7 +58,7 @@ Before deployment:
    by this code, but Worker/D1 operations still use the existing account's
    allowances. Do not upgrade or authorize spend without the operator's consent.
 4. Obtain approval to deploy the reviewed patch and apply additive migration
-   0011 to the existing D1 database. Back up using the operator's normal process.
+   0011 and 0012 to the existing D1 database (apply only pending migrations). Back up using the operator's normal process.
    Preserve the existing Worker/D1, owner secret, principals, sessions and UI.
 5. Configure the following non-secret values and a rate-limit binding. Keep
    existing settings, and add `/mcp`, `/oauth/*`, and `/.well-known/oauth-*` to
@@ -132,7 +132,24 @@ a production message simply to test installation without message authorization.
 ## Expiry, revocation and limits
 
 - Access tokens last at most 15 minutes; grants and refresh families last at most
-  seven days. Reconnect with consent after absolute expiry.
+  seven days by default. Each predefined client may opt into up to 90 days
+  maximum and up to 30 days without token renewal. Reconnect with fresh consent
+  after expiry; refresh never extends the original absolute maximum.
+- Optional client fields in private `MCP_OAUTH_CLIENTS_JSON` are
+  `max_grant_days` (integer 1–90) and `refresh_idle_days` (integer 1–30, no
+  greater than the maximum). Both default to 7. Invalid values fail closed.
+  For example, a client can select `max_grant_days: 90` and
+  `refresh_idle_days: 30`; this is an explicit increase in persistent access
+  requiring the operator’s approval before activation. Values are server-side
+  policy, not client-supplied OAuth arguments.
+- Both durations are snapshotted when a consent request starts and displayed
+  at review. Approval uses exactly that snapshot. Changing configuration never
+  changes a pending consent or an existing grant. Migration 0012 adds policy
+  columns with legacy seven-day defaults; it does not change any existing
+  grant expiry, token, identity, scope or session.
+- Each refresh token expires at the earlier of the original grant expiry and
+  its issue time plus the snapshotted inactivity period. Automatic background
+  renewal counts as activity: this is not a measure of human or tool use.
 - Every refresh is single-use. Reuse, including concurrent refresh attempts,
   revokes the entire family and requires reauthorization. Clients should
   serialize refresh and retain the latest returned refresh token.
@@ -155,7 +172,16 @@ a production message simply to test installation without message authorization.
   Capacity refusals preserve an unused refresh token and return 429; retrying
   consent is unnecessary. Spent refresh hashes remain through grant expiry to
   detect replay. Expired unexchanged consent grants are cleaned up without
-  trapping a Coordinator's grant quota for a week.
+  trapping a Coordinator's grant quota until the absolute expiry. An idle
+  family is removed, together with its replay history, only once no unexpired
+  access token, unspent refresh token or unexchanged code remains. Explicitly
+  revoked families are also dead and are removed during the next cleanup.
+- Longer grants retain more replay evidence: 90 days of 15-minute renewal
+  retains about 8,640 refresh hashes per grant. Six continuously renewed grants
+  can exhaust the existing 50,000-row cap (four at the 150/day issuance ceiling).
+  The cap is not automatically raised. Plan for the number of active grants;
+  capacity refusal is retry-safe but can interrupt access until space is freed.
+  Do not delete live replay evidence to make space.
 
 ## Verification evidence required for activation
 
@@ -165,6 +191,29 @@ plugin identity and a real host tool-discovery/read result. Clearly label
 unavailable or unrun checks. Never describe a source patch as an active
 connection.
 
+## Changing an existing deployment
+
+Apply the additive 0012 migration before deploying source that uses its columns.
+Existing seven-day connections continue unchanged. Set approved per-client
+values in private configuration, run source-pin checks and the full suite, then
+review and deploy with the existing bindings preserved. A new consent is needed
+for a longer grant; never edit a live grant’s expiry directly. Verify the displayed
+lifetime and actual `hub_connection_info` expiry after reconnecting.
+
+Rolling the Worker back to code before 0012 is safe for the added columns, but
+that code does not enforce a separate refresh inactivity deadline on new tokens.
+After longer grants have been issued, preserve the new token logic or explicitly
+revoke affected grants before such a rollback. Reducing configured lifetimes
+only affects new consent requests; it does not revoke existing access.
+
+The generic UI currently has an owner-only invitation **Revoke** action. It
+invalidates every grant and other use of that Coordinator invitation, not just
+one plugin connection. Individual-grant revocation is supported through
+`/oauth/revoke` by the host holding a token; there is no grant-management UI.
+Never ask a user to copy a token into chat or a command to revoke it. A host’s
+Disconnect button must not be described as server-side revocation unless its
+behavior has been verified.
+
 Primary references:
 
 - [MCP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
@@ -172,3 +221,5 @@ Primary references:
 - [OpenAI authentication](https://developers.openai.com/plugins/build/auth)
 - [OpenAI custom MCP setup](https://developers.openai.com/api/docs/guides/custom-mcp-server)
 - [Cloudflare rate limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+
+- [OAuth refresh-token security and inactivity](https://www.rfc-editor.org/rfc/rfc9700.html#section-4.14.2)

@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import worker from '../src/worker.mjs';
 import {SqliteD1} from './d1-sqlite.mjs';
 const ORIGIN='https://hub.test',RESOURCE=ORIGIN+'/mcp',CLIENT='test-client',REDIRECT='https://client.test/callback';
@@ -8,8 +9,8 @@ const verifier='synthetic-pkce-verifier-0123456789012345678901234567890123456789
 const sha=async value=>Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))).toString('hex');
 const pkce=async value=>Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))).toString('base64url');
 const now=()=>Math.floor(Date.now()/1000);
-async function fixture(t){
-  const DB=new SqliteD1();t.after(()=>DB.close());const env={DB,OWNER_TOKEN:OWNER,MCP_AUTH_RATE_LIMITER:{async limit(){return {success:true};}},MCP_ORIGIN:ORIGIN,MCP_OAUTH_CLIENTS_JSON:JSON.stringify([{client_id:CLIENT,client_name:'Synthetic client <unsafe>',redirect_uris:[REDIRECT]}])};
+async function fixture(t,{throughMigration=null}={}){
+  const DB=new SqliteD1(':memory:',{throughMigration});t.after(()=>DB.close());const env={DB,OWNER_TOKEN:OWNER,MCP_AUTH_RATE_LIMITER:{async limit(){return {success:true};}},MCP_ORIGIN:ORIGIN,MCP_OAUTH_CLIENTS_JSON:JSON.stringify([{client_id:CLIENT,client_name:'Synthetic client <unsafe>',redirect_uris:[REDIRECT]}])};
   const request=(path,options={})=>worker.fetch(new Request(path.startsWith('http')?path:ORIGIN+path,options),env);
   const api=async(token,path,body,method=body===undefined?'GET':'POST')=>{const r=await request(path,{method,headers:{authorization:'Bearer '+token,...(body===undefined?{}:{'content-type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});return {status:r.status,body:await r.json()};};
   const invite=async(name,profile='coordinator',projects=['alpha','beta'])=>(await api(OWNER,'/api/principals',{name,account:'synthetic',profile,projects})).body;
@@ -283,4 +284,106 @@ test('consent keeps exact Origin and browser CSRF requirements, including reject
   const selected=f.DB.database.prepare('SELECT * FROM mcp_oauth_requests').get();
   for(const action of ['approve','deny'])for(const origin of ['null','https://evil.test','http://hub.test','https://hub.test:444']){assert.equal((await f.postForm('/oauth/authorize',{action,request_id:b.request_id},{origin,cookie:b.cookie})).status,403);assert.deepEqual(f.DB.database.prepare('SELECT * FROM mcp_oauth_requests').get(),selected);}
   assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_grants').get().n,0);assert.equal((await f.approve(b)).status,303);
+});
+
+const configureLifetime=(f,max_grant_days=90,refresh_idle_days=30)=>{const clients=JSON.parse(f.env.MCP_OAUTH_CLIENTS_JSON);Object.assign(clients[0],{max_grant_days,refresh_idle_days});f.env.MCP_OAUTH_CLIENTS_JSON=JSON.stringify(clients);};
+function controllableClock(t,f){
+  const start=now();t.mock.timers.enable({apis:['Date'],now:start*1000});
+  // Make SQLite's authorization predicates use the same deterministic clock.
+  f.DB.database.function('strftime',{varargs:true},(format,value)=>{assert.equal(format,'%s');assert.equal(value,'now');return String(now());});
+  return {start,set:seconds=>t.mock.timers.setTime(seconds*1000)};
+}
+const currentGrant=f=>f.DB.database.prepare('SELECT * FROM mcp_oauth_grants ORDER BY created_at DESC').get();
+
+test('lifetime configuration is bounded, private per client, and cannot be overridden by OAuth arguments',async t=>{
+  const f=await fixture(t);
+  for(const [max,idle] of [[0,7],[91,7],[7,0],[90,31],[7,8],['90',30],[90,'30'],[null,7],[7,null],[7.5,7]]){configureLifetime(f,max,idle);assert.equal((await f.begin()).r.status,503);}
+  configureLifetime(f);const b=await f.begin({max_grant_days:'999',refresh_idle_days:'999'}),review=await f.review(b);assert.equal(review.status,200);assert.match(await review.text(),/up to 90 days.*30 days without token renewal/s);assert.equal((await f.approve(b)).status,303);
+  const grant=currentGrant(f);assert.equal(grant.expires_at-grant.created_at,90*86400);assert.equal(grant.idle_seconds,30*86400);
+  assert.equal((await f.begin({scope:'hub:read owner:admin'})).r.status,400);
+});
+
+test('consent snapshots lifetime before review and settings changes never extend or shrink existing grants',async t=>{
+  const f=await fixture(t),b=await f.begin();configureLifetime(f);
+  const r=await f.review(b);assert.match(await r.text(),/up to 7 days.*7 days without token renewal/s);
+  const approved=await f.approve(b),code=new URL(approved.headers.get('location')).searchParams.get('code');assert.equal(approved.status,303);
+  const tokens=await (await f.exchange(code)).json(),legacy=currentGrant(f);assert.equal(legacy.expires_at-legacy.created_at,7*86400);assert.equal(legacy.idle_seconds,7*86400);
+  const longer=await f.begin();assert.equal((await f.review(longer)).status,200);configureLifetime(f,1,1);assert.equal((await f.approve(longer)).status,303);
+  const newGrant=f.DB.database.prepare('SELECT * FROM mcp_oauth_grants WHERE id<>?').get(legacy.id);assert.equal(newGrant.expires_at-newGrant.created_at,90*86400);assert.equal(newGrant.idle_seconds,30*86400);
+  assert.equal((await refresh(f,tokens)).status,200);assert.deepEqual(f.DB.database.prepare('SELECT * FROM mcp_oauth_grants WHERE id=?').get(legacy.id),legacy);
+});
+
+test('additive lifetime migration preserves legacy grants, tokens and pending consent at seven days',async t=>{
+  const f=await fixture(t,{throughMigration:'0011'}),stamp=now(),id=crypto.randomUUID(),access=Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'),renew=Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+  f.DB.database.prepare('INSERT INTO mcp_oauth_grants(id,principal_id,credential_hash,session_id,project,client_id,resource,scope,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,f.actor.principal.id,await sha(f.actor.token),f.own.id,'alpha',CLIENT,RESOURCE,'hub:read hub:message',stamp,stamp+7*86400);
+  const insert=f.DB.database.prepare('INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at) VALUES (?,?,?,?,?)');insert.run(await sha(access),id,'access',stamp+900,stamp);insert.run(await sha(renew),id,'refresh',stamp+7*86400,stamp);
+  f.DB.database.prepare('INSERT INTO mcp_oauth_requests(id_hash,csrf_hash,client_id,redirect_uri,resource,scope,state,challenge,expires_at) VALUES (?,?,?,?,?,?,?,?,?)').run('synthetic-legacy-request','synthetic-csrf',CLIENT,REDIRECT,RESOURCE,'hub:read','synthetic-state','synthetic-challenge',stamp+600);
+  const before=currentGrant(f),tokensBefore=f.DB.database.prepare('SELECT * FROM mcp_oauth_tokens').all();
+  f.DB.database.exec(readFileSync(new URL('../migrations/0012_mcp_consent_lifetimes.sql',import.meta.url),'utf8'));configureLifetime(f);
+  const after=currentGrant(f);assert.deepEqual({...after},{...before,idle_seconds:7*86400});assert.deepEqual(f.DB.database.prepare('SELECT * FROM mcp_oauth_tokens').all(),tokensBefore);
+  const pending=f.DB.database.prepare('SELECT max_age_seconds,idle_seconds FROM mcp_oauth_requests').get();assert.deepEqual({...pending},{max_age_seconds:7*86400,idle_seconds:7*86400});
+  assert.equal((await f.rpc(access,'tools/list')).status,200);const r=await refresh(f,{refresh_token:renew});assert.equal(r.status,200);const next=await r.json();assert.equal(f.DB.database.prepare('SELECT expires_at FROM mcp_oauth_tokens WHERE token_hash=?').get(await sha(next.refresh_token)).expires_at,before.expires_at);assert.equal(currentGrant(f).expires_at,before.expires_at);
+});
+
+test('refresh inactivity has exact expiry boundaries and renews without sliding the absolute cap',async t=>{
+  const f=await fixture(t);configureLifetime(f);const clock=controllableClock(t,f),tokens=await f.connect(),grant=currentGrant(f);
+  assert.equal(tokens.expires_in,900);let latest=tokens;
+  for(const at of [30*86400-1,60*86400-2,89*86400]){clock.set(clock.start+at);const r=await refresh(f,latest);assert.equal(r.status,200,await r.clone().text());latest=await r.json();const row=f.DB.database.prepare('SELECT expires_at FROM mcp_oauth_tokens WHERE token_hash=?').get(await sha(latest.refresh_token));assert.equal(row.expires_at,Math.min(grant.expires_at,now()+30*86400));assert.equal(currentGrant(f).expires_at,grant.expires_at);}
+  clock.set(grant.expires_at-1);const r=await refresh(f,latest);assert.equal(r.status,200);latest=await r.json();assert.equal(latest.expires_in,1);
+  clock.set(grant.expires_at);assert.equal((await refresh(f,latest)).status,400);assert.equal((await f.rpc(latest.access_token,'tools/list')).status,401);
+});
+
+test('an unrenewed 90-day grant stops after exactly 30 days and cannot be revived',async t=>{
+  const f=await fixture(t);configureLifetime(f);const clock=controllableClock(t,f),tokens=await f.connect(),id=currentGrant(f).id;
+  clock.set(clock.start+30*86400);assert.equal((await refresh(f,tokens)).status,400);assert.equal((await f.rpc(tokens.access_token,'tools/list')).status,401);
+  await f.connect();assert.equal(f.DB.database.prepare('SELECT * FROM mcp_oauth_grants WHERE id=?').get(id),undefined);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_tokens WHERE grant_id=?').get(id).n,0);assert.equal((await refresh(f,tokens)).status,400);
+});
+
+test('expired spent refresh evidence survives while its 90-day family is live and replay revokes it',async t=>{
+  const f=await fixture(t);configureLifetime(f);const clock=controllableClock(t,f),original=await f.connect();clock.set(clock.start+29*86400);const latest=await (await refresh(f,original)).json();
+  clock.set(clock.start+31*86400);await f.connect();assert.ok(f.DB.database.prepare('SELECT consumed_by FROM mcp_oauth_tokens WHERE token_hash=?').get(await sha(original.refresh_token))?.consumed_by);
+  assert.equal((await refresh(f,original)).status,400);assert.equal((await refresh(f,latest)).status,400);
+});
+
+test('idle expiry and authority revocation races cannot issue replacement tokens',async t=>{
+  for(const change of ['idle','revoked']){
+    const f=await fixture(t);configureLifetime(f);const tokens=await f.connect(),original=f.DB.batch.bind(f.DB),before=f.DB.database.prepare("SELECT COUNT(*) AS n FROM mcp_oauth_tokens WHERE kind='refresh'").get().n;let count=0;
+    f.DB.batch=async statements=>{if(++count===2){if(change==='idle')f.DB.database.prepare("UPDATE mcp_oauth_tokens SET expires_at=? WHERE kind='refresh' AND consumed_by IS NULL").run(now());else f.DB.database.prepare('UPDATE mcp_oauth_grants SET revoked_at=?').run(now());}return original(statements);};
+    assert.equal((await refresh(f,tokens)).status,400);assert.equal(f.DB.database.prepare("SELECT COUNT(*) AS n FROM mcp_oauth_tokens WHERE kind='refresh'").get().n,before);assert.equal(f.DB.database.prepare("SELECT consumed_by FROM mcp_oauth_tokens WHERE kind='refresh'").get().consumed_by,null);
+  }
+});
+
+test('cleanup keeps live access even after refresh expires, then removes the dead family atomically',async t=>{
+  const f=await fixture(t);configureLifetime(f);const tokens=await f.connect(),grant=currentGrant(f);f.DB.database.prepare("UPDATE mcp_oauth_tokens SET expires_at=? WHERE kind='refresh'").run(now());
+  await f.connect();assert.equal((await f.rpc(tokens.access_token,'tools/list')).status,200);assert.ok(f.DB.database.prepare('SELECT id FROM mcp_oauth_grants WHERE id=?').get(grant.id));
+  f.DB.database.prepare("UPDATE mcp_oauth_tokens SET expires_at=? WHERE grant_id=? AND kind='access'").run(now(),grant.id);await f.connect();assert.equal(f.DB.database.prepare('SELECT id FROM mcp_oauth_grants WHERE id=?').get(grant.id),undefined);
+});
+
+test('90-day renewal load retains bounded replay history and fails safely at the workspace cap',async t=>{
+  const f=await fixture(t);configureLifetime(f);const clock=controllableClock(t,f);let latest=await f.connect();const id=currentGrant(f).id;
+  // Exercise an actual 15-minute rotation schedule, rather than just seeding rows.
+  for(let i=1;i<90*96;i++){clock.set(clock.start+i*900);const r=await refresh(f,latest);assert.equal(r.status,200,`rotation ${i}: ${await r.clone().text()}`);latest=await r.json();}
+  assert.equal(f.DB.database.prepare("SELECT COUNT(*) AS n FROM mcp_oauth_tokens WHERE grant_id=? AND kind='refresh'").get(id).n,8640);assert.equal(f.DB.database.prepare("SELECT COUNT(*) AS n FROM mcp_oauth_tokens WHERE grant_id=? AND kind='access'").get(id).n,1);
+  const rows=f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_tokens').get().n,insert=f.DB.database.prepare("INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at,consumed_by) VALUES (?,?,'refresh',?,?,?)");
+  f.DB.database.exec('BEGIN');for(let i=rows;i<50000;i++)insert.run('synthetic-cap-history-'+i,id,now()+86400,clock.start,'synthetic-spent');f.DB.database.exec('COMMIT');
+  assert.equal((await refresh(f,latest)).status,429);assert.equal(f.DB.database.prepare('SELECT consumed_by FROM mcp_oauth_tokens WHERE token_hash=?').get(await sha(latest.refresh_token)).consumed_by,null);assert.equal((await f.rpc(latest.access_token,'tools/list')).status,200);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_tokens').get().n,50000);
+  // Synthetic fixture releases only its filler rows; production never discards live replay evidence.
+  f.DB.database.prepare("DELETE FROM mcp_oauth_tokens WHERE token_hash LIKE 'synthetic-cap-history-%'").run();assert.equal((await refresh(f,latest)).status,200);
+});
+
+
+test('refresh queued across the idle deadline is rejected using database execution time',async t=>{
+  const f=await fixture(t);configureLifetime(f);const clock=controllableClock(t,f),tokens=await f.connect(),original=f.DB.batch.bind(f.DB);clock.set(clock.start+30*86400-1);let count=0;
+  f.DB.batch=async statements=>{if(++count===2)clock.set(clock.start+30*86400);return original(statements);};
+  assert.equal((await refresh(f,tokens)).status,400);assert.equal(f.DB.database.prepare("SELECT COUNT(*) AS n FROM mcp_oauth_tokens WHERE kind='refresh'").get().n,1);assert.equal(f.DB.database.prepare("SELECT consumed_by FROM mcp_oauth_tokens WHERE kind='refresh'").get().consumed_by,null);
+});
+
+
+test('revoked-family cleanup frees capacity without deleting another live family replay evidence',async t=>{
+  const f=await fixture(t);configureLifetime(f);const dead=await f.connect(),deadId=currentGrant(f).id,original=await f.connect(),live=await (await refresh(f,original)).json();
+  const insert=f.DB.database.prepare("INSERT INTO mcp_oauth_tokens(token_hash,grant_id,kind,expires_at,created_at,consumed_by) VALUES (?,?,'refresh',?,?,?)"),rows=f.DB.database.prepare('SELECT COUNT(*) AS n FROM mcp_oauth_tokens').get().n;
+  f.DB.database.exec('BEGIN');for(let i=rows;i<50000;i++)insert.run('synthetic-revoked-history-'+i,deadId,now()+30*86400,now()-2*86400,'synthetic-spent');f.DB.database.exec('COMMIT');
+  assert.equal((await refresh(f,live)).status,429);assert.equal((await f.postForm('/oauth/revoke',{client_id:CLIENT,token:dead.refresh_token})).status,200);
+  const renewed=await refresh(f,live);assert.equal(renewed.status,200);assert.equal(f.DB.database.prepare('SELECT id FROM mcp_oauth_grants WHERE id=?').get(deadId),undefined);assert.equal((await refresh(f,dead)).status,400);
+  assert.ok(f.DB.database.prepare('SELECT consumed_by FROM mcp_oauth_tokens WHERE token_hash=?').get(await sha(original.refresh_token))?.consumed_by);assert.equal((await refresh(f,original)).status,400);assert.equal((await f.rpc((await renewed.json()).access_token,'tools/list')).status,401);
 });
