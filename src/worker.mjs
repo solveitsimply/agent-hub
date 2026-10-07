@@ -1,7 +1,7 @@
 import { searchTerm, messageFilters } from './message-filters.mjs';
 import { remoteMcp, isRemoteMcpPath, mcpGrantPredicate, checkMcpGrant } from './remote-mcp.mjs';
 import { accessApi } from './access-api.mjs';
-import {hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
+import {coordinationDatabaseSession,inboxCursorIndexes,hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
@@ -163,7 +163,7 @@ async function api(request,env,delegatedPrincipal=null){
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
   if(origin&&origin!==url.origin)fail(403,'ORIGIN_DENIED','Cross-origin coordination requests are disabled.');
   if(!env.DB)fail(503,'NOT_CONFIGURED','Coordination database is not configured.');
-  const db=env.DB.withSession('first-primary');
+  const db=coordinationDatabaseSession(env.DB);
   if(url.pathname.startsWith('/api/observer/')||url.pathname==='/api/observer'||request.headers.get('authorization')?.startsWith('Bearer hub_observer_'))return observerApi({request,db,path:url.pathname,method:request.method,readBody:()=>bodyOf(request),digest,fail,checkKeys,string,json});
   const principal=delegatedPrincipal??await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
@@ -270,7 +270,7 @@ async function api(request,env,delegatedPrincipal=null){
     if(checkpoint?.wait)checkpoint.waitStartedAt=date;
     const identity=registrationKeys(externalId);
     const registered=await db.prepare(`SELECT id,external_id FROM sessions WHERE principal_id=? AND ${identity.uuid?'lower(external_id) IN (?,?)':'external_id IN (?,?)'} ORDER BY CASE WHEN external_id=? THEN 0 ELSE 1 END LIMIT 1`).bind(principal.id,...identity.keys,externalId).first();
-    if(registered&&(registered.external_id!==externalId||await canonicalSessionId(db,registered.id)!==registered.id)){
+    if(registered){
       const current=await sessionById(db,registered.id,principal,true);
       if(canonicalMachine(current.machine,aliases)!==canonicalMachine(machine,aliases)||current.project!==project)fail(409,'SESSION_IDENTITY_CONFLICT','That external chat belongs to another machine or project.');
       if(identity.uuid&&externalId.startsWith('codex:')&&!current.external_id.includes(':')){
@@ -279,7 +279,8 @@ async function api(request,env,delegatedPrincipal=null){
         await audit(db,principal,'session.normalized',current.id).run();
       }
       await requireCurrent(db,principal);
-      const receipt=await sessionById(db,current.id,principal,true);requireActive(receipt);
+      const receipt=await sessionById(db,current.id,principal,true);
+      if(registered.external_id!==externalId||current.id!==registered.id)requireActive(receipt);
       return json({session:sessionView(receipt,principal,aliases)});
     }
     const capacity=coordination?sessionPolicy(env,fail):{activePrincipal:100,activeWorkspace:2000,retainedPrincipal:1000,retainedWorkspace:10000};
@@ -398,8 +399,18 @@ async function api(request,env,delegatedPrincipal=null){
     const after=numeric(url.searchParams.get('after')??0,'after');const sessionId=url.searchParams.get('sessionId');
     const direction=url.searchParams.get('direction')??'all';
     if(!['all','incoming'].includes(direction)||direction==='incoming'&&!sessionId)fail(422,'INVALID_DIRECTION','Use all, or incoming with an exact sessionId.');
+    const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
+    if(beforeValue!==null&&(after!==0||latest))fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');
+    const before=beforeValue===null?null:numeric(beforeValue,'before');
     let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
-    if(sessionId){const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true}),incoming=await sessionMessageScope(db,session.id,'m.to_session_id');if(direction==='incoming'){query+=' AND '+incoming.sql;values.push(...incoming.values);}else{const outgoing=await sessionMessageScope(db,session.id,'m.from_session_id');query+=' AND ('+outgoing.sql+' OR '+incoming.sql+')';values.push(...outgoing.values,...incoming.values);}}
+    const scopes=[];
+    if(sessionId){
+      const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true});
+      const indexed=await inboxCursorIndexes(db),directions=direction==='incoming'?['to']:['to','from'];
+      for(const side of directions){
+        scopes.push({scope:await sessionMessageScope(db,session.id,`m.${side}_session_id`),index:`messages_${side}_session${indexed&&!owner?'_delivery':''}`});
+      }
+    }
     if(!owner){query+=` AND m.review_state='APPROVED' AND m.to_session_id IS NOT NULL AND (m.from_principal_id=? OR m.to_principal_id=?) AND m.project IN (${principal.projects.map(()=>'?').join(',')})`;values.push(principal.id,principal.id,...principal.projects);}
     const reviewState=url.searchParams.get('reviewState');if(reviewState!==null){ownerOnly(principal);if(!['PENDING','APPROVED','REJECTED'].includes(reviewState))fail(422,'INVALID_REVIEW','Select a supported review state.');query+=' AND m.review_state=?';values.push(reviewState);}
     const filters=messageFilters(url,fail,owner);
@@ -407,9 +418,18 @@ async function api(request,env,delegatedPrincipal=null){
     const project=url.searchParams.get('project');if(project){requireProject(principal,slug(project));query+=' AND m.project=?';values.push(project);}
     const kind=url.searchParams.get('kind');
     if(kind!==null){if(!KINDS.has(kind))fail(422,'INVALID_KIND','Select a supported message kind.');query+=' AND m.kind=?';values.push(kind);}
-    const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
-    if(beforeValue!==null){if(after!==0||latest)fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');query+=` AND ${cursorColumn}<?`;values.push(numeric(beforeValue,'before'));}
+    if(before!==null){query+=` AND ${cursorColumn}<?`;values.push(before);}
     const descending=latest||beforeValue!==null;
+    if(scopes.length){
+      const conditions=query.slice(MESSAGE_SELECT.length),filterValues=[...values],branches=[];
+      for(const {scope,index} of scopes){
+        branches.push(`SELECT id FROM (SELECT m.id FROM messages m INDEXED BY ${index}${conditions} AND ${scope.sql} ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1})`);
+        values.push(...filterValues,...scope.values);
+      }
+      // Each filtered branch needs only the first page plus one. UNION removes
+      // self-message duplicates before the combined page is ordered/limited.
+      query+=' AND m.id IN ('+branches.join(' UNION ')+')';
+    }
     const rows=await db.prepare(query+` ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1}`).bind(...values).all();
     const hasMore=rows.results.length>limit,page=rows.results.slice(0,limit);
     const ordered=descending?page.reverse():page;

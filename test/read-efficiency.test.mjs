@@ -219,3 +219,77 @@ test('authenticated D1 row-read quota errors are retryable and unexpected storag
   assert.ok(!JSON.stringify(failure.body).includes('secret_column'));
   assert.equal(failure.headers.get('retry-after'),null);
 });
+
+test('capability detection survives new request sessions and keeps databases isolated',async t=>{
+  const {coordinationDatabaseSession,hasCoordinationSchema,inboxCursorIndexes}=await import('../src/coordination-capacity.mjs');
+  const f=fixture(t),old=fixture(t,{throughMigration:'0009'}),statements=[];
+  const binding={withSession(){return {prepare(sql){statements.push(sql);return f.DB.prepare(sql);}};}};
+  for(let i=0;i<4;i++){
+    const db=coordinationDatabaseSession(binding);
+    assert.equal(await hasCoordinationSchema(db),true);
+    assert.equal(await inboxCursorIndexes(db),true);
+  }
+  assert.equal(statements.filter(sql=>sql==='SELECT scope FROM hub_message_usage LIMIT 0').length,1);
+  assert.equal(statements.filter(sql=>sql.includes("type='index'")).length,1);
+  assert.ok(!statements.some(sql=>sql.includes("type='table'")));
+  const oldBinding={withSession(){return {prepare:sql=>old.DB.prepare(sql)};}};
+  assert.equal(await hasCoordinationSchema(coordinationDatabaseSession(oldBinding)),false);
+  old.DB.database.exec((await import('node:fs')).readFileSync(new URL('../migrations/0010_coordination_capacity.sql',import.meta.url),'utf8'));
+  assert.equal(await hasCoordinationSchema(coordinationDatabaseSession(oldBinding)),true,'uncached absence sees a live additive migration');
+  const broken={withSession(){return {prepare(){throw new Error('D1 quota exhausted');}};}};
+  await assert.rejects(()=>hasCoordinationSchema(coordinationDatabaseSession(broken)),/quota exhausted/);
+});
+
+test('chat inbox seeks chat and delivery cursor despite unrelated history, preserving self-message deduplication',async t=>{
+  const f=fixture(t),a=await invite(f,'efficient',['alpha']),b=await invite(f,'peer-efficient',['alpha']);
+  const x=await register(f,a.token,'alpha','RUNNING','reader'),y=await register(f,b.token,'alpha','RUNNING','writer');
+  const send=async(token,from,to,key)=>{
+    const r=await f.call(token,'/api/messages',{project:'alpha',fromSessionId:from,toSessionId:to,kind:'NOTE',body:key,idempotencyKey:key});
+    assert.equal(r.status,201);return r.body.message;
+  };
+  const first=await send(b.token,y.id,x.id,'first-seek'),self=await send(a.token,x.id,x.id,'self-seek');
+  const last=await send(b.token,y.id,x.id,'last-seek');
+  const unrelated=f.DB.database.prepare('INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,created_at,review_state,delivery_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+  for(let i=0;i<2000;i++)unrelated.run(b.principal.id,b.principal.id,y.id,y.id,'alpha','NOTE','unrelated','unrelated-'+i,'hash-'+i,new Date().toISOString(),'APPROVED',10000+i);
+  const captured=[],prepare=f.DB.prepare.bind(f.DB);
+  f.DB.prepare=sql=>{const statement=prepare(sql),bind=statement.bind;statement.bind=(...params)=>{if(sql.startsWith('SELECT m.*,sender'))captured.push({sql,params});return bind(...params);};return statement;};
+  const result=await f.call(a.token,`/api/messages?sessionId=${x.id}&after=${first.deliveryCursor}&view=compact&limit=1`);
+  assert.deepEqual(result.body.messages.map(m=>m.id),[self.id]);assert.equal(result.body.hasMore,true);
+  const next=await f.call(a.token,`/api/messages?sessionId=${x.id}&after=${result.body.nextCursor}&view=compact&limit=1`);
+  assert.deepEqual(next.body.messages.map(m=>m.id),[last.id]);
+  const before=await f.call(a.token,`/api/messages?sessionId=${x.id}&before=${last.deliveryCursor}&view=compact&limit=2`);
+  assert.deepEqual(before.body.messages.map(m=>m.id),[first.id,self.id]);
+  const incoming=await f.call(a.token,`/api/messages?sessionId=${x.id}&direction=incoming&after=${last.deliveryCursor}`);
+  assert.deepEqual(incoming.body.messages,[]);assert.equal(incoming.body.nextCursor,last.deliveryCursor);
+  const plans=captured.map(({sql,params})=>f.DB.database.prepare('EXPLAIN QUERY PLAN '+sql).all(...params).map(r=>r.detail));
+  for(const plan of plans){
+    assert.ok(plan.some(d=>/messages_to_session_delivery .*to_session_id=\? AND delivery_id>\?/.test(d)),plan.join('\n'));
+    assert.ok(!plan.some(d=>/SEARCH m USING INDEX messages_project_id \(project=\?\)$/.test(d)),plan.join('\n'));
+  }
+  assert.ok(plans[0].some(d=>d.includes('messages_from_session_delivery')));
+  assert.ok(plans[2].some(d=>d.includes('delivery_id>? AND delivery_id<?')));
+  assert.equal((await f.call(b.token,`/api/messages?sessionId=${x.id}`)).body.messages.length,2,'project peer sees its own conversation, not another principal self-message');
+  assert.ok(captured[0].sql.includes('ORDER BY m.delivery_id ASC LIMIT 2'),'each branch bounds candidates to the requested page plus one');
+  for(let i=0;i<200;i++)unrelated.run(b.principal.id,a.principal.id,y.id,x.id,'alpha',i===199?'HANDOFF':'NOTE',i===199?'needle beyond the first page':'ordinary history','related-'+i,'related-hash-'+i,new Date().toISOString(),'APPROVED',20000+i);
+  const searched=await f.call(a.token,`/api/messages?sessionId=${x.id}&q=needle&view=compact&limit=1`);
+  assert.equal(searched.body.messages.length,1);assert.equal(searched.body.messages[0].body,'needle beyond the first page');assert.equal(searched.body.hasMore,false,'search applies before branch limits');
+  const kind=await f.call(a.token,`/api/messages?sessionId=${x.id}&kind=HANDOFF&view=compact&limit=1`);
+  assert.deepEqual(kind.body.messages.map(m=>m.id),searched.body.messages.map(m=>m.id),'kind filters apply before branch limits');
+  const latest=await f.call(a.token,`/api/messages?sessionId=${x.id}&latest=1&view=compact&limit=1`);
+  assert.deepEqual(latest.body.messages.map(m=>m.id),searched.body.messages.map(m=>m.id));assert.equal(latest.body.hasMore,true);
+});
+
+test('repeat exact registration avoids admission scans without reopening archived or foreign identities',async t=>{
+  const f=fixture(t),a=await invite(f,'register-efficient',['alpha']),other=await invite(f,'foreign-register',['alpha']);
+  const request={externalId:'repeat-fixture',machine:'reader',label:'Original',project:'alpha',task:'Original task',status:'RUNNING'};
+  const first=await f.call(a.token,'/api/sessions',request);assert.equal(first.status,201);
+  f.env.SESSION_LIMITS_JSON=JSON.stringify({activePrincipal:1,activeWorkspace:1,retainedPrincipal:1,retainedWorkspace:1});
+  const statements=[],prepare=f.DB.prepare.bind(f.DB);f.DB.prepare=sql=>{statements.push(sql);return prepare(sql);};
+  const repeat=await f.call(a.token,'/api/sessions',{...request,label:'Must not overwrite',status:'DONE'});
+  assert.equal(repeat.status,200);assert.equal(repeat.body.session.id,first.body.session.id);assert.equal(repeat.body.session.label,'Original');assert.equal(repeat.body.session.status,'RUNNING');
+  assert.ok(!statements.some(sql=>sql.startsWith('INSERT INTO sessions')),'no quota scan for an existing registration');
+  assert.equal((await f.call(a.token,'/api/sessions',{...request,machine:'different'})).status,409);
+  assert.equal((await f.call(other.token,'/api/sessions',request)).status,409,'foreign principal cannot reuse capacity or identity');
+  f.DB.database.prepare('UPDATE sessions SET archived_at=? WHERE id=?').run(new Date().toISOString(),first.body.session.id);
+  const archived=await f.call(a.token,'/api/sessions',request);assert.equal(archived.status,200);assert.ok(archived.body.session.archivedAt,'read-only retry preserves archived receipt');
+});
