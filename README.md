@@ -6,7 +6,9 @@ Worker serves an authenticated API and a responsive dashboard, and D1 stores
 sessions, messages, acknowledgments and coordination ownership.
 
 Use the CLI from any shell, or the stdio MCP bridge from any compatible agent
-app. The application has no runtime package dependencies and no dependency on a
+app. An optional authenticated [remote Coordinator MCP transport](docs/remote-mcp.md)
+connects remote hosts through scoped OAuth without sharing owner authority.
+The application has no runtime package dependencies and no dependency on a
 particular repository, agent provider, organization or AWS account.
 
 ## What it does

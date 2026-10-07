@@ -1,4 +1,5 @@
 import { searchTerm, messageFilters } from './message-filters.mjs';
+import { remoteMcp, isRemoteMcpPath, mcpGrantPredicate, checkMcpGrant } from './remote-mcp.mjs';
 import { accessApi } from './access-api.mjs';
 import {hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
@@ -33,9 +34,9 @@ const mayProject = (principal,project)=>principal.role==='owner'||principal.proj
 const requireProject = (principal,project)=>{if(!mayProject(principal,project))fail(403,'PROJECT_DENIED','This invitation does not include that project.');};
 const ownerOnly = principal=>{if(principal.role!=='owner')fail(403,'OWNER_REQUIRED','Only the workspace owner can manage invitations.');};
 const ACTIVE_PRINCIPAL='EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)';
-const messagingAuthority=principal=>principal.capabilitySchema
+const messagingAuthority=principal=>(principal.capabilitySchema
   ? `EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1 AND ${principal.profile==='coordinator'?"access_profile='observer' AND coordinator_access=1":"access_profile='agent' AND coordinator_access=0"})`
-  : ACTIVE_PRINCIPAL;
+  : ACTIVE_PRINCIPAL)+(principal.mcpGrantId?` AND ${mcpGrantPredicate(principal.mcpGrantId,principal.mcpAccessTokenHash)}`:'');
 const dayAgo=()=>new Date(Date.now()-86400000).toISOString();
 const configuredMessageLimit=(environment,name,defaultValue,workspaceMaximum)=>{
   const value=environment[name];
@@ -46,6 +47,7 @@ const configuredMessageLimit=(environment,name,defaultValue,workspaceMaximum)=>{
   return Math.min(parsed,workspaceMaximum);
 };
 async function requireCurrent(db,principal){
+  if(principal.mcpGrantId)await checkMcpGrant(db,principal.mcpGrantId,principal.mcpAccessTokenHash);
   const current=await db.prepare('SELECT * FROM principals WHERE id=? AND active=1').bind(principal.id).first();
   if(!current)fail(401,'UNAUTHORIZED','This invitation has been revoked.');
   if(principal.role!=='owner'&&principalView(current).profile!==principal.profile)fail(403,'ACCESS_CHANGED','Invitation permissions changed; reconnect before continuing.');
@@ -156,14 +158,14 @@ function readOptions(url, maximum) {
   if((raw!==null&&!/^[1-9]\d*$/.test(raw))||!Number.isSafeInteger(limit)||limit<1||limit>maximum)fail(422,'INVALID_LIMIT',`limit must be 1 to ${maximum}.`);
   return {view,limit};
 }
-async function api(request,env){
+async function api(request,env,delegatedPrincipal=null){
   const url=new URL(request.url);const origin=request.headers.get('origin');
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
   if(origin&&origin!==url.origin)fail(403,'ORIGIN_DENIED','Cross-origin coordination requests are disabled.');
   if(!env.DB)fail(503,'NOT_CONFIGURED','Coordination database is not configured.');
   const db=env.DB.withSession('first-primary');
   if(url.pathname.startsWith('/api/observer/')||url.pathname==='/api/observer'||request.headers.get('authorization')?.startsWith('Bearer hub_observer_'))return observerApi({request,db,path:url.pathname,method:request.method,readBody:()=>bodyOf(request),digest,fail,checkKeys,string,json});
-  const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
+  const principal=delegatedPrincipal??await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
   const path=url.pathname,method=request.method;
   const coordination=await hasCoordinationSchema(db);
@@ -446,10 +448,11 @@ export default {
     try{
       const url=new URL(request.url),path=url.pathname;
       if(url.protocol==='http:'&&!['localhost','127.0.0.1','[::1]'].includes(url.hostname)){
-        if(path.startsWith('/api/'))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
+        if(path.startsWith('/api/')||isRemoteMcpPath(path))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
         url.protocol='https:';return Response.redirect(url.href,308);
       }
       if(path==='/health'&&request.method==='GET')return json({ok:true,service:'agent-hub'});
+      if(isRemoteMcpPath(path))return await remoteMcp({request,env,authenticate,principalView,api});
       if(path.startsWith('/api/'))return await api(request,env);
       if(!['GET','HEAD'].includes(request.method))return json({error:{code:'METHOD_NOT_ALLOWED',message:'Use a supported method.'}},405);
       return await env.ASSETS.fetch(request);
