@@ -269,6 +269,14 @@ test('chat inbox seeks chat and delivery cursor despite unrelated history, prese
   assert.ok(plans[0].some(d=>d.includes('messages_from_session_delivery')));
   assert.ok(plans[2].some(d=>d.includes('delivery_id>? AND delivery_id<?')));
   assert.equal((await f.call(b.token,`/api/messages?sessionId=${x.id}`)).body.messages.length,2,'project peer sees its own conversation, not another principal self-message');
+  assert.ok(captured[0].sql.includes('ORDER BY m.delivery_id ASC LIMIT 2'),'each branch bounds candidates to the requested page plus one');
+  for(let i=0;i<200;i++)unrelated.run(b.principal.id,a.principal.id,y.id,x.id,'alpha',i===199?'HANDOFF':'NOTE',i===199?'needle beyond the first page':'ordinary history','related-'+i,'related-hash-'+i,new Date().toISOString(),'APPROVED',20000+i);
+  const searched=await f.call(a.token,`/api/messages?sessionId=${x.id}&q=needle&view=compact&limit=1`);
+  assert.equal(searched.body.messages.length,1);assert.equal(searched.body.messages[0].body,'needle beyond the first page');assert.equal(searched.body.hasMore,false,'search applies before branch limits');
+  const kind=await f.call(a.token,`/api/messages?sessionId=${x.id}&kind=HANDOFF&view=compact&limit=1`);
+  assert.deepEqual(kind.body.messages.map(m=>m.id),searched.body.messages.map(m=>m.id),'kind filters apply before branch limits');
+  const latest=await f.call(a.token,`/api/messages?sessionId=${x.id}&latest=1&view=compact&limit=1`);
+  assert.deepEqual(latest.body.messages.map(m=>m.id),searched.body.messages.map(m=>m.id));assert.equal(latest.body.hasMore,true);
 });
 
 test('repeat exact registration avoids admission scans without reopening archived or foreign identities',async t=>{

@@ -403,19 +403,13 @@ async function api(request,env,delegatedPrincipal=null){
     if(beforeValue!==null&&(after!==0||latest))fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');
     const before=beforeValue===null?null:numeric(beforeValue,'before');
     let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
+    const scopes=[];
     if(sessionId){
       const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true});
       const indexed=await inboxCursorIndexes(db),directions=direction==='incoming'?['to']:['to','from'];
-      const branches=[];
       for(const side of directions){
-        const scope=await sessionMessageScope(db,session.id,`m.${side}_session_id`);
-        const index=`messages_${side}_session${indexed&&!owner?'_delivery':''}`;
-        branches.push(`SELECT m.id FROM messages m INDEXED BY ${index} WHERE ${scope.sql} AND ${cursorColumn}>?${before===null?'':` AND ${cursorColumn}<?`}`);
-        values.push(...scope.values,after,...(before===null?[]:[before]));
+        scopes.push({scope:await sessionMessageScope(db,session.id,`m.${side}_session_id`),index:`messages_${side}_session${indexed&&!owner?'_delivery':''}`});
       }
-      // UNION removes self-message duplicates. Each branch seeks within the
-      // authorized chat lineage; principal/project/review filters stay below.
-      query+=' AND m.id IN ('+branches.join(' UNION ')+')';
     }
     if(!owner){query+=` AND m.review_state='APPROVED' AND m.to_session_id IS NOT NULL AND (m.from_principal_id=? OR m.to_principal_id=?) AND m.project IN (${principal.projects.map(()=>'?').join(',')})`;values.push(principal.id,principal.id,...principal.projects);}
     const reviewState=url.searchParams.get('reviewState');if(reviewState!==null){ownerOnly(principal);if(!['PENDING','APPROVED','REJECTED'].includes(reviewState))fail(422,'INVALID_REVIEW','Select a supported review state.');query+=' AND m.review_state=?';values.push(reviewState);}
@@ -426,6 +420,16 @@ async function api(request,env,delegatedPrincipal=null){
     if(kind!==null){if(!KINDS.has(kind))fail(422,'INVALID_KIND','Select a supported message kind.');query+=' AND m.kind=?';values.push(kind);}
     if(before!==null){query+=` AND ${cursorColumn}<?`;values.push(before);}
     const descending=latest||beforeValue!==null;
+    if(scopes.length){
+      const conditions=query.slice(MESSAGE_SELECT.length),filterValues=[...values],branches=[];
+      for(const {scope,index} of scopes){
+        branches.push(`SELECT id FROM (SELECT m.id FROM messages m INDEXED BY ${index}${conditions} AND ${scope.sql} ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1})`);
+        values.push(...filterValues,...scope.values);
+      }
+      // Each filtered branch needs only the first page plus one. UNION removes
+      // self-message duplicates before the combined page is ordered/limited.
+      query+=' AND m.id IN ('+branches.join(' UNION ')+')';
+    }
     const rows=await db.prepare(query+` ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1}`).bind(...values).all();
     const hasMore=rows.results.length>limit,page=rows.results.slice(0,limit);
     const ordered=descending?page.reverse():page;

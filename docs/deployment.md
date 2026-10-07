@@ -153,6 +153,7 @@ messages, IDs, custody or aliases. Back up and verify the existing database,
 apply only pending migrations, then deploy the matching Worker. Before the
 migration, inbox reads use existing session indexes; they remain compatible.
 With the new indexes, each incoming/outgoing branch seeks by session and cursor
+and applies filters before bounding each branch to the requested page plus one,
 before results are combined. Self-messages appear once and owner inboxes keep
 their message-ID cursors. Principal, project, review and search filters still
 apply before response pagination.
