@@ -1,5 +1,19 @@
 const DEFAULTS=Object.freeze({sessionDaily:500,principalDaily:3000,workspaceDaily:5000,retainedMessages:100000,retainedBodyBytes:128*1024*1024});
 const schemaCache=new WeakMap();
+const databaseBindings=new WeakMap();
+const inboxIndexCache=new WeakMap();
+// D1 sessions are request-scoped; capability caches belong to the stable binding.
+export function coordinationDatabaseSession(binding){
+  const db=binding.withSession('first-primary');databaseBindings.set(db,binding);return db;
+}
+const cacheKey=db=>databaseBindings.get(db)??db;
+export async function inboxCursorIndexes(db){
+  const key=cacheKey(db),cached=inboxIndexCache.get(key);
+  if(cached&&(cached.available||Date.now()-cached.checkedAt<60000))return cached.available;
+  const rows=await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('messages_to_session_delivery','messages_from_session_delivery')").all();
+  const available=rows.results.length===2;
+  inboxIndexCache.set(key,{available,checkedAt:Date.now()});return available;
+}
 export function sessionPolicy(env,fail){
   const defaults={activePrincipal:500,activeWorkspace:2000,retainedPrincipal:10000,retainedWorkspace:100000};let configured={};
   try{configured=env.SESSION_LIMITS_JSON?JSON.parse(env.SESSION_LIMITS_JSON):{};}catch{fail(503,'INVALID_SESSION_POLICY','The operator must correct SESSION_LIMITS_JSON.');}
@@ -9,10 +23,13 @@ export function sessionPolicy(env,fail){
   return limits;
 }
 export async function hasCoordinationSchema(db){
-  if(schemaCache.get(db))return true;
-  const available=!!await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='hub_message_usage'").first();
-  if(available)schemaCache.set(db,true);
-  return available;
+  const key=cacheKey(db);
+  if(schemaCache.get(key))return true;
+  // A table probe avoids scanning sqlite_master. Do not cache absence: additive
+  // migrations can become available while an isolate remains alive.
+  try{await db.prepare('SELECT scope FROM hub_message_usage LIMIT 0').all();}
+  catch(error){if(/no such table: (?:main\.)?hub_message_usage\b/u.test(error.message))return false;throw error;}
+  schemaCache.set(key,true);return true;
 }
 export function messagePolicy(env,fail){
   let configured={};
