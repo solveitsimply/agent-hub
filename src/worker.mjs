@@ -142,7 +142,7 @@ async function sessionById(db,id,principal,own=false,{custodyOnly=false,resolveM
 const MESSAGE_SELECT='SELECT m.*,sender.name AS sender_name,recipient.name AS recipient_name FROM messages m JOIN principals sender ON sender.id=m.from_principal_id JOIN principals recipient ON recipient.id=m.to_principal_id';
 const messageView=(row,principal,conversation=false)=>({id:row.id,fromSessionId:row.from_session_id,toSessionId:row.to_session_id,fromPrincipalId:row.from_principal_id,toPrincipalId:row.to_principal_id,fromPrincipalName:row.sender_name,toPrincipalName:row.recipient_name,project:row.project,kind:row.kind,body:principal.role==='owner'||(conversation&&['observer','coordinator'].includes(principal.profile)&&mayProject(principal,row.project))||(row.review_state==='APPROVED'&&row.to_session_id!==null)?row.body:null,replyTo:row.reply_to,createdAt:row.created_at,acknowledgedAt:row.acknowledged_at,reviewState:row.review_state,reviewedAt:row.reviewed_at,deliveryCursor:row.delivery_id,...(row.owner_relay_reference?{ownerRelay:{source:'delegate-reported',sourceReference:row.owner_relay_reference}}:{}),...(principal.role==='owner'?{payloadHash:row.payload_hash}:{})});
 const requireActive=session=>{if(session?.archived_at)fail(409,'SESSION_ARCHIVED','This session was archived; register a new session for new work.');};
-const audit=(db,principal,action,id)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND CASE WHEN EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?) THEN 0 ELSE (SELECT COUNT(*)<100000 AND COUNT(*) FILTER (WHERE principal_id=?)<10000 FROM audit_events) END`).bind(principal.id,action,String(id),now(),principal.id,principal.id,action,String(id),dayAgo(),principal.id);
+const audit=(db,principal,action,id,afterChange=false)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL}${afterChange?' AND changes()>0':''} AND CASE WHEN EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?) THEN 0 ELSE (SELECT COUNT(*)<100000 AND COUNT(*) FILTER (WHERE principal_id=?)<10000 FROM audit_events) END`).bind(principal.id,action,String(id),now(),principal.id,principal.id,action,String(id),dayAgo(),principal.id);
 async function messageById(db,id,principal){
   const row=await db.prepare(`${MESSAGE_SELECT} WHERE m.id=?`).bind(id).first();
   if(!row)fail(404,'MESSAGE_NOT_FOUND','Message not found.');requireProject(principal,row.project);
@@ -237,6 +237,22 @@ async function api(request,env,delegatedPrincipal=null){
     const status=url.searchParams.get('status');if(status!==null&&status!=='WAITING'&&!STATUSES.has(status))fail(422,'INVALID_FILTER','Select a supported status.');
     const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null&&staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');
     const attention=url.searchParams.get('attention');if(attention!==null&&!ATTENTION.includes(attention))fail(422,'INVALID_FILTER','Select a supported attention category.');
+    if(view==='compact'&&!q&&!attention){
+      // Discover cheap candidates first. Correlated lifecycle/history reads are
+      // evaluated only for the requested page, never the complete inventory.
+      let pageScope=filteredScope;const pageValues=[...filterValues];
+      if(status==='WAITING')pageScope+=" AND s.status IN ('WAITING_ON_USER','WAITING_ON_AGENT')";
+      else if(status!==null){pageScope+=' AND s.status=?';pageValues.push(status);}
+      if(staleOnly!==null){pageScope+=" AND s.status<>'DONE' AND (julianday(?) - julianday(s.last_seen_at))*86400000 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3000";pageValues.push(now());}
+      const needsAttribution=filters.clauses.some(clause=>clause.includes('a.metadata_json'));
+      const from=needsAttribution?(coordination?sessionHistorySelect(SESSION_FROM):SESSION_FROM):' FROM sessions s';
+      const candidates='SELECT s.id,s.last_seen_at'+from+pageScope;
+      const count=await db.prepare('SELECT COUNT(*) AS total FROM ('+candidates+' LIMIT 2000)').bind(...pageValues).first();
+      const select=coordination?sessionHistorySelect(SESSION_SELECT):SESSION_SELECT;
+      const rows=await db.prepare('WITH page AS MATERIALIZED ('+candidates+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT ? OFFSET ?) '+select+' WHERE s.id IN (SELECT id FROM page) ORDER BY s.last_seen_at DESC,s.id ASC').bind(...pageValues,limit,offset).all();
+      const total=count.total,hasMore=offset+limit<total;
+      return json({sessions:rows.results.map(row=>compactSession(sessionView(row,principal,aliases))),limit,offset,total,hasMore,nextOffset:hasMore?offset+limit:null});
+    }
     // Admission caps the workspace at 2000 active sessions. Read this authorized
     // baseline once; all counts precede the response page and status filters.
     const listSelect=coordination?sessionHistorySelect(SESSION_LIST_SELECT):SESSION_LIST_SELECT;
@@ -331,17 +347,25 @@ async function api(request,env,delegatedPrincipal=null){
     await requireCurrent(db,principal);const current=await sessionById(db,row.id,principal,true);if(!current.archived_at)fail(409,'OWNERSHIP_HELD','Session custody changed; recheck its claims before archiving.');return json({session:sessionView(current,principal,aliases)});
   }
   const sessionMatch=path.match(/^\/api\/sessions\/([^/]+)(\/heartbeat)?$/);
+  if(sessionMatch&&method==='GET'&&!sessionMatch[2])return json({session:sessionView(await sessionById(db,sessionMatch[1],principal),principal,aliases)});
   if(sessionMatch&&((method==='POST'&&sessionMatch[2])||(method==='PATCH'&&!sessionMatch[2]))){
     const row=await sessionById(db,sessionMatch[1],principal,true);requireActive(row);const body=await readBody();let mutation;
-    if(sessionMatch[2]){checkKeys(body,[]);mutation=await db.prepare('UPDATE sessions SET last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(now(),row.id,principal.id,principal.id).run();}
+    if(sessionMatch[2]){checkKeys(body,[]);mutation=await db.prepare(`UPDATE sessions SET last_seen_at=CASE WHEN last_seen_at>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ',last_seen_at,'+0.001 seconds') ELSE ? END WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)`).bind(now(),now(),row.id,principal.id,principal.id).run();}
     else{
-      checkKeys(body,['label','status','task','details','environment','workContext']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
+      checkKeys(body,['label','status','task','details','environment','workContext','expectedRevision','expectedLastSeenAt','requireUnclaimed']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
+      if(body.expectedRevision!==undefined&&(!Number.isSafeInteger(body.expectedRevision)||body.expectedRevision<0))fail(422,'INVALID_REVISION','expectedRevision must be a nonnegative integer.');
+      if(body.expectedLastSeenAt!==undefined&&(typeof body.expectedLastSeenAt!=='string'||!Number.isFinite(Date.parse(body.expectedLastSeenAt))))fail(422,'INVALID_TIMESTAMP','expectedLastSeenAt must be a timestamp from the session receipt.');
+      if(body.requireUnclaimed!==undefined&&body.requireUnclaimed!==true)fail(422,'INVALID_FIELD','requireUnclaimed must be true when supplied.');
       const label=body.label===undefined?row.label:string(body.label,'label',120);
       const task=body.task===undefined?row.task:string(body.task,'task',2000),previous=JSON.parse(row.details_json),details=body.details===undefined?previous:detailsOf(body.details);
       if(body.details!==undefined && previous.workContext!==undefined)details.workContext=previous.workContext;
       if(body.workContext!==undefined)details.workContext=parseWorkContext(body.workContext,fail);
       const environment=body.environment===undefined?row.environment:string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use local, dev, staging or production for the target application instance.');
-      const results=await db.batch([db.prepare('UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(status,task,label,JSON.stringify(details),environment,now(),row.id,principal.id,principal.id),audit(db,principal,'session.updated',row.id)]);mutation=results[0];
+      let guard='',guardValues=[];
+      if(body.expectedRevision!==undefined){guard+=' AND revision=?';guardValues.push(body.expectedRevision);}
+      if(body.expectedLastSeenAt!==undefined){guard+=' AND last_seen_at=?';guardValues.push(body.expectedLastSeenAt);}
+      if(body.requireUnclaimed)guard+=' AND NOT EXISTS(SELECT 1 FROM ownership WHERE owner_session_id=sessions.id)';
+      const results=await db.batch([db.prepare(`UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=CASE WHEN last_seen_at>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ',last_seen_at,'+0.001 seconds') ELSE ? END WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)`+guard).bind(status,task,label,JSON.stringify(details),environment,now(),now(),row.id,principal.id,principal.id,...guardValues),audit(db,principal,'session.updated',row.id,true)]);mutation=results[0];
     }
     await requireCurrent(db,principal);if(!mutation.meta.changes)fail(409,'SESSION_CHANGED','Registration changed before this update; reread the canonical session and retry.');const current=await sessionById(db,row.id,principal,true);requireActive(current);return json({session:sessionView(current,principal,aliases)});
   }

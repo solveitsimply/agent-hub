@@ -421,3 +421,20 @@ test('CLI/MCP coordinator reads keep message-ID cursors and relay provenance thr
   bridge.send({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'hub_send_message',arguments:args}});
   const relay=JSON.parse(await bridge.next());assert.equal(relay.result.isError,undefined);assert.deepEqual(requests[2].body.ownerRelay,ownerRelay);assert.equal(requests[2].body.body,args.body);assert.equal('userAuthorized' in requests[2].body,false);assert.match(JSON.stringify(relay),/delegate-reported/);assert.match(JSON.stringify(relay),/Human turn 7/);
 });
+
+test('clients forward page offsets, exact session reads and reconciliation guards',async t=>{
+  const requests=[],url=await localServer(t,async(request,response)=>{
+    let body='';for await(const chunk of request)body+=chunk;
+    requests.push({method:request.method,url:request.url,body:body?JSON.parse(body):null});
+    response.writeHead(200,{'content-type':'application/json'});response.end(JSON.stringify({ok:true}));
+  });
+  assert.equal((await runCli(['sessions','alpha','--offset','20','--limit','5'],{url})).code,0);
+  assert.equal(new URL(requests[0].url,url).searchParams.get('offset'),'20');
+  assert.equal((await runCli(['session','known-id'],{url})).code,0);assert.equal(requests[1].url,'/api/sessions/known-id');
+  assert.equal((await runCli(['sessions','--offset','2001'],{url})).code,1);assert.equal(requests.length,2);
+  const bridge=startBridge(url);t.after(()=>bridge.child.kill());
+  const args={sessionId:'known-id',status:'BLOCKED',expectedRevision:0,expectedLastSeenAt:'2026-10-10T12:00:00.000Z',requireUnclaimed:true};
+  bridge.send({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'hub_update_session',arguments:args}});
+  assert.equal(JSON.parse(await bridge.next()).result.isError,undefined);
+  const {sessionId,...body}=args;assert.deepEqual(requests[2],{method:'PATCH',url:'/api/sessions/known-id',body});
+});

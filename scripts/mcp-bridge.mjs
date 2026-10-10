@@ -25,6 +25,11 @@ const workContext = { ...schema({repository:string, branch:{type:['string','null
 
 const tools = [
   {
+    name:'hub_read_session',description:`Read one known session ID without discovery or registration. Merged IDs resolve to their canonical session. ${COORDINATION_REMINDER}`,
+    inputSchema:schema({sessionId:string},['sessionId']),
+    async invoke(client,{sessionId}){return client.request('GET',`/api/sessions/${encodeURIComponent(sessionId)}`);},
+  },
+  {
     name:'hub_read_message_limits',description:`Read message budgets and UTC daily reset time for this identity and optionally an owned session. Check after capacity errors; never poll. ${COORDINATION_REMINDER}`,
     inputSchema:schema({sessionId:optionalString}),
     async invoke(client,args){return client.request('GET','/api/limits',{query:args});},
@@ -88,10 +93,10 @@ const tools = [
   {
     name: 'hub_update_session',
     description: `Update an owned session; combine changed fields. Rename label while keeping IDs. Refreshes presence; skip redundant heartbeat. ${COORDINATION_REMINDER}`,
-    inputSchema: schema({ sessionId: string, label: sessionLabel, status: { type: 'string', enum: ['RUNNING', 'WAITING_ON_USER', 'WAITING_ON_AGENT', 'BLOCKED', 'DONE'] }, task: optionalString, environment, workContext, details }, ['sessionId']),
+    inputSchema: schema({ sessionId: string, label: sessionLabel, status: { type: 'string', enum: ['RUNNING', 'WAITING_ON_USER', 'WAITING_ON_AGENT', 'BLOCKED', 'DONE'] }, task: optionalString, environment, workContext, details, expectedRevision:nonnegativeInteger, expectedLastSeenAt:string, requireUnclaimed:{const:true} }, ['sessionId']),
     async invoke(client, args) {
-      const { label, status, task, environment, workContext, details } = args;
-      return client.request('PATCH', `/api/sessions/${encodeURIComponent(args.sessionId)}`, { body: { label, status, task, environment, workContext, details } });
+      const { label, status, task, environment, workContext, details, expectedRevision, expectedLastSeenAt, requireUnclaimed } = args;
+      return client.request('PATCH', `/api/sessions/${encodeURIComponent(args.sessionId)}`, { body: { label, status, task, environment, workContext, details, expectedRevision, expectedLastSeenAt, requireUnclaimed } });
     },
   },
   {
@@ -112,8 +117,8 @@ const tools = [
   },
   {
     name: 'hub_list_sessions',
-    description: `Find sessions using dashboard filters. agentName is app, not chat title; branch requires repository. Unknown flags exclude known values. Compact default; hasMore means narrow filters or raise limit. Full includes facets/evidence. ${COORDINATION_REMINDER}`,
-    inputSchema: schema({ view:responseView, limit:pageLimit, attention:{type:'string',enum:['WAITING_USER','READY','RECONCILE','WAITING','WORKING','PAUSED','CLEANUP','COMPLETE']}, project: optionalString, agentName: optionalString, agentModel: optionalString, machine: optionalString, environment:{type:'string',enum:['local','dev','staging','production']}, repository:optionalString, branch:optionalString, status:{type:'string',enum:['RUNNING','WAITING','WAITING_ON_USER','WAITING_ON_AGENT','BLOCKED','DONE']}, staleOnly:{const:true}, environmentUnknown:{const:true}, repositoryUnknown:{const:true}, branchUnknown:{const:true}, agentNameUnknown: { const: true }, agentModelUnknown: { const: true }, machineUnknown: { const: true } }),
+    description: `Find sessions using dashboard filters. Reuse known IDs with hub_read_session. agentName is app, not chat title; branch requires repository. Compact default; request nextOffset only when another page is needed. Full includes facets/evidence. ${COORDINATION_REMINDER}`,
+    inputSchema: schema({ view:responseView, limit:pageLimit, offset:{...nonnegativeInteger,maximum:2000}, attention:{type:'string',enum:['WAITING_USER','READY','RECONCILE','WAITING','WORKING','PAUSED','CLEANUP','COMPLETE']}, project: optionalString, agentName: optionalString, agentModel: optionalString, machine: optionalString, environment:{type:'string',enum:['local','dev','staging','production']}, repository:optionalString, branch:optionalString, status:{type:'string',enum:['RUNNING','WAITING','WAITING_ON_USER','WAITING_ON_AGENT','BLOCKED','DONE']}, staleOnly:{const:true}, environmentUnknown:{const:true}, repositoryUnknown:{const:true}, branchUnknown:{const:true}, agentNameUnknown: { const: true }, agentModelUnknown: { const: true }, machineUnknown: { const: true } }),
     async invoke(client, args) {
       return client.request('GET', '/api/sessions', {query:readQuery(args,sessionFilterNames,sessionFlagNames)});
     },

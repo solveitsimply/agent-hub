@@ -244,3 +244,7 @@ scope. Receiving agents retain their own approval requirements and verify any
 consequential authorization through their trusted human channel. A coordinator
 may send ordinary coordination messages under standing human authorization;
 that authorization never permits it to invent human decisions.
+
+`GET /api/sessions/:id` returns `{session}` for a known active or archived session in the caller's project scope, resolving merged IDs to the canonical session. It preserves read custody and performs no registration or status write. Reuse the saved ID for lifecycle checks. Ordinary compact listings select the page in SQL before loading lifecycle/history; full summaries and text/attention searches retain their complete authorized baseline.
+
+Session PATCH optionally accepts `expectedRevision` and `expectedLastSeenAt` copied from an exact receipt, and `requireUnclaimed:true`. A concurrent material report, heartbeat or held ownership rejects the guarded write with `409 SESSION_CHANGED`. Use these guards when reconciling provisional records; an ended native turn alone never proves objective completion.
