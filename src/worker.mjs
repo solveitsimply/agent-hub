@@ -352,10 +352,10 @@ async function api(request,env,delegatedPrincipal=null){
     const row=await sessionById(db,sessionMatch[1],principal,true);requireActive(row);const body=await readBody();let mutation;
     if(sessionMatch[2]){checkKeys(body,[]);mutation=await db.prepare(`UPDATE sessions SET last_seen_at=CASE WHEN last_seen_at>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ',last_seen_at,'+0.001 seconds') ELSE ? END WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)`).bind(now(),now(),row.id,principal.id,principal.id).run();}
     else{
-      checkKeys(body,['label','status','task','details','environment','workContext','expectedRevision','expectedLastSeenAt','requireUnclaimed']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
+      checkKeys(body,['label','status','task','details','environment','workContext','expectedRevision','expectedLastSeenAt','requireUnclaimed','requireUnobserved']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
       if(body.expectedRevision!==undefined&&(!Number.isSafeInteger(body.expectedRevision)||body.expectedRevision<0))fail(422,'INVALID_REVISION','expectedRevision must be a nonnegative integer.');
       if(body.expectedLastSeenAt!==undefined&&(typeof body.expectedLastSeenAt!=='string'||!Number.isFinite(Date.parse(body.expectedLastSeenAt))))fail(422,'INVALID_TIMESTAMP','expectedLastSeenAt must be a timestamp from the session receipt.');
-      if(body.requireUnclaimed!==undefined&&body.requireUnclaimed!==true)fail(422,'INVALID_FIELD','requireUnclaimed must be true when supplied.');
+      for(const flag of ['requireUnclaimed','requireUnobserved'])if(body[flag]!==undefined&&body[flag]!==true)fail(422,'INVALID_FIELD',`${flag} must be true when supplied.`);
       const label=body.label===undefined?row.label:string(body.label,'label',120);
       const task=body.task===undefined?row.task:string(body.task,'task',2000),previous=JSON.parse(row.details_json),details=body.details===undefined?previous:detailsOf(body.details);
       if(body.details!==undefined && previous.workContext!==undefined)details.workContext=previous.workContext;
@@ -365,6 +365,7 @@ async function api(request,env,delegatedPrincipal=null){
       if(body.expectedRevision!==undefined){guard+=' AND revision=?';guardValues.push(body.expectedRevision);}
       if(body.expectedLastSeenAt!==undefined){guard+=' AND last_seen_at=?';guardValues.push(body.expectedLastSeenAt);}
       if(body.requireUnclaimed)guard+=' AND NOT EXISTS(SELECT 1 FROM ownership WHERE owner_session_id=sessions.id)';
+      if(body.requireUnobserved)guard+=' AND NOT EXISTS(SELECT 1 FROM observer_sessions WHERE session_id=sessions.id)';
       const results=await db.batch([db.prepare(`UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=CASE WHEN last_seen_at>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ',last_seen_at,'+0.001 seconds') ELSE ? END WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)`+guard).bind(status,task,label,JSON.stringify(details),environment,now(),now(),row.id,principal.id,principal.id,...guardValues),audit(db,principal,'session.updated',row.id,true)]);mutation=results[0];
     }
     await requireCurrent(db,principal);if(!mutation.meta.changes)fail(409,'SESSION_CHANGED','Registration changed before this update; reread the canonical session and retry.');const current=await sessionById(db,row.id,principal,true);requireActive(current);return json({session:sessionView(current,principal,aliases)});
