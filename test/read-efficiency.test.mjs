@@ -293,3 +293,68 @@ test('repeat exact registration avoids admission scans without reopening archive
   f.DB.database.prepare('UPDATE sessions SET archived_at=? WHERE id=?').run(new Date().toISOString(),first.body.session.id);
   const archived=await f.call(a.token,'/api/sessions',request);assert.equal(archived.status,200);assert.ok(archived.body.session.archivedAt,'read-only retry preserves archived receipt');
 });
+
+test('compact pagination hydrates only the page and preserves authorized filters and counts',async t=>{
+  const f=fixture(t),actor=await invite(f,'page-reader',['alpha']),foreign=await invite(f,'page-foreign',['beta']);
+  const ids=[];
+  for(let i=0;i<27;i++){
+    const row=await register(f,actor.token,'alpha',i%3===0?'WAITING_ON_AGENT':'RUNNING','page-machine');ids.push(row.id);
+    f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run('2020-01-01T00:00:00.000Z',row.id);
+  }
+  const hidden=await register(f,foreign.token,'beta','RUNNING','page-machine');
+  const prepare=f.DB.prepare.bind(f.DB),hydrated=[],queries=[];
+  f.DB.prepare=sql=>{
+    queries.push(sql);const statement=prepare(sql),all=statement.all.bind(statement);
+    statement.all=async()=>{const result=await all();if(sql.includes('SELECT s.*,p.name AS principal_name'))hydrated.push(...result.results.map(row=>row.id));return result;};return statement;
+  };
+  const first=(await f.call(actor.token,'/api/sessions?view=compact&limit=4')).body;
+  assert.equal(first.total,27);assert.equal(first.nextOffset,4);assert.equal(first.sessions.length,4);
+  assert.equal(hydrated.length,4,'only returned cards load lifecycle details');
+  assert.ok(queries.some(sql=>sql.startsWith('WITH page AS MATERIALIZED')));
+  assert.ok(!queries.some(sql=>sql.includes('GROUP BY owner_session_id')),'compact pages never aggregate all claims');
+  const second=(await f.call(actor.token,'/api/sessions?view=compact&limit=4&offset=4')).body;
+  assert.equal(second.total,27);assert.ok(second.sessions.every(row=>!first.sessions.some(previous=>previous.id===row.id)));
+  const full=(await f.call(actor.token,'/api/sessions?view=full&status=WAITING&staleOnly=1')).body;
+  const filtered=(await f.call(actor.token,'/api/sessions?view=compact&status=WAITING&staleOnly=1&limit=200')).body;
+  assert.equal(filtered.total,9);assert.deepEqual(filtered.sessions.map(row=>row.id),full.sessions.map(row=>row.id));
+  const empty=(await f.call(actor.token,'/api/sessions?view=compact&offset=2000')).body;
+  assert.equal(empty.total,27);assert.deepEqual(empty.sessions,[]);assert.equal(empty.hasMore,false);
+  assert.equal((await f.call(actor.token,'/api/sessions?view=compact&project=beta')).status,403);
+  assert.equal((await f.call(actor.token,'/api/sessions/'+hidden.id)).status,403);
+  const receipt=await f.call(actor.token,'/api/sessions/'+ids[0]);assert.equal(receipt.status,200);assert.equal(receipt.body.session.id,ids[0]);
+  assert.equal((await f.call(actor.token,'/api/sessions/missing')).status,404);
+});
+
+test('guarded reconciliation refuses newer reports, heartbeats and held ownership',async t=>{
+  const f=fixture(t),actor=await invite(f,'guard-reader',['alpha']),row=await register(f,actor.token,'alpha','RUNNING','machine');
+  const receipt=(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+  const update={status:'BLOCKED',expectedRevision:receipt.lifecycle.revision,expectedLastSeenAt:receipt.lastSeenAt,requireUnclaimed:true};
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,{...update,expectedRevision:999},'PATCH')).status,409);
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,{...update,expectedLastSeenAt:'2000-01-01T00:00:00.000Z'},'PATCH')).status,409);
+  f.DB.database.prepare('INSERT INTO ownership VALUES (?,?,?,?)').run('alpha','active-work',row.id,new Date().toISOString());
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH')).status,409);
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id)).body.session.status,'RUNNING');
+  f.DB.database.prepare('DELETE FROM ownership WHERE owner_session_id=?').run(row.id);
+  const result=await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH');assert.equal(result.status,200);assert.equal(result.body.session.status,'BLOCKED');
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH')).status,409,'a stale reconciliation cannot repeat after the material revision changes');
+});
+
+test('guarded reconciliation rejects real same-clock heartbeat and material report without a false audit',async t=>{
+  const f=fixture(t),actor=await invite(f,'fixed-clock-reader',['alpha']),row=await register(f,actor.token,'alpha','RUNNING','machine');
+  const OriginalDate=Date,fixed='2026-10-10T12:00:00.000Z';
+  globalThis.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[fixed]));}static now(){return OriginalDate.parse(fixed);}};
+  try{
+    f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run(fixed,row.id);
+    const read=async()=>(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+    const reconcile=receipt=>f.call(actor.token,'/api/sessions/'+row.id,{status:'BLOCKED',expectedRevision:receipt.lifecycle.revision,expectedLastSeenAt:receipt.lastSeenAt,requireUnclaimed:true},'PATCH');
+    const auditCount=()=>f.DB.database.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='session.updated' AND target_id=?").get(row.id).n;
+    let receipt=await read();assert.equal(receipt.lastSeenAt,fixed);
+    assert.equal((await f.call(actor.token,'/api/sessions/'+row.id+'/heartbeat',{})).status,200);
+    assert.equal((await read()).lastSeenAt,'2026-10-10T12:00:00.001Z');
+    assert.equal((await reconcile(receipt)).status,409);assert.equal(auditCount(),0,'a rejected guard must not audit a successful update');
+    receipt=await read();
+    assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,{task:'Actual active work reported'},'PATCH')).status,200);
+    const current=await read();assert.equal(current.lastSeenAt,'2026-10-10T12:00:00.002Z');assert.ok(current.lifecycle.revision>receipt.lifecycle.revision);
+    assert.equal((await reconcile(receipt)).status,409);assert.equal((await read()).task,'Actual active work reported');assert.equal(auditCount(),1);
+  }finally{globalThis.Date=OriginalDate;}
+});
