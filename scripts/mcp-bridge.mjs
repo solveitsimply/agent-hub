@@ -93,10 +93,10 @@ const tools = [
   {
     name: 'hub_update_session',
     description: `Update an owned session; combine changed fields. Rename label while keeping IDs. Refreshes presence; skip redundant heartbeat. ${COORDINATION_REMINDER}`,
-    inputSchema: schema({ sessionId: string, label: sessionLabel, status: { type: 'string', enum: ['RUNNING', 'WAITING_ON_USER', 'WAITING_ON_AGENT', 'BLOCKED', 'DONE'] }, task: optionalString, environment, workContext, details, expectedRevision:nonnegativeInteger, expectedLastSeenAt:string, requireUnclaimed:{const:true} }, ['sessionId']),
+    inputSchema: schema({ sessionId: string, label: sessionLabel, status: { type: 'string', enum: ['RUNNING', 'WAITING_ON_USER', 'WAITING_ON_AGENT', 'BLOCKED', 'DONE'] }, task: optionalString, environment, workContext, details, expectedRevision:nonnegativeInteger, expectedLastSeenAt:string, requireUnclaimed:{const:true}, requireUnobserved:{const:true} }, ['sessionId']),
     async invoke(client, args) {
-      const { label, status, task, environment, workContext, details, expectedRevision, expectedLastSeenAt, requireUnclaimed } = args;
-      return client.request('PATCH', `/api/sessions/${encodeURIComponent(args.sessionId)}`, { body: { label, status, task, environment, workContext, details, expectedRevision, expectedLastSeenAt, requireUnclaimed } });
+      const { label, status, task, environment, workContext, details, expectedRevision, expectedLastSeenAt, requireUnclaimed, requireUnobserved } = args;
+      return client.request('PATCH', `/api/sessions/${encodeURIComponent(args.sessionId)}`, { body: { label, status, task, environment, workContext, details, expectedRevision, expectedLastSeenAt, requireUnclaimed, requireUnobserved } });
     },
   },
   {

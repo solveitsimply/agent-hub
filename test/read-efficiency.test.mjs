@@ -358,3 +358,14 @@ test('guarded reconciliation rejects real same-clock heartbeat and material repo
     assert.equal((await reconcile(receipt)).status,409);assert.equal((await read()).task,'Actual active work reported');assert.equal(auditCount(),1);
   }finally{globalThis.Date=OriginalDate;}
 });
+
+test('guarded placeholder reconciliation refuses a native observer enrolled after the receipt',async t=>{
+  const f=fixture(t),actor=await invite(f,'native-guard-reader',['alpha']),row=await register(f,actor.token,'alpha','RUNNING','machine');
+  const receipt=(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+  f.DB.database.prepare('INSERT INTO observers(id,name,token_hash,created_at,expires_at) VALUES (?,?,?,?,?)').run('guard-observer','Synthetic observer','synthetic-hash',new Date().toISOString(),'2099-01-01T00:00:00.000Z');
+  f.DB.database.prepare('INSERT INTO observer_sessions(session_id,observer_id,native_id,state,observed_at,received_at) VALUES (?,?,?,?,?,?)').run(row.id,'guard-observer','synthetic-native','active',new Date().toISOString(),new Date().toISOString());
+  const update={status:'BLOCKED',expectedRevision:receipt.lifecycle.revision,expectedLastSeenAt:receipt.lastSeenAt,requireUnclaimed:true,requireUnobserved:true};
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH')).status,409);
+  const current=(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+  assert.equal(current.status,'RUNNING');assert.equal(current.lifecycle.observation.state,'active');assert.equal(current.lifecycle.revision,receipt.lifecycle.revision);assert.equal(current.lastSeenAt,receipt.lastSeenAt);
+});
