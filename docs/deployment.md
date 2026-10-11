@@ -145,3 +145,26 @@ registrations. Rename shared invitation display labels through owner-only
 administration, preserving its credential and enrollment. Send one authorized
 merge notice to the affected chat and known correspondents, and update private
 registration maps. Never archive or delete message history to escape quotas.
+
+## Inbox read-efficiency upgrade
+
+Migration 0013 adds session/delivery-cursor indexes without changing retained
+messages, IDs, custody or aliases. Back up and verify the existing database,
+apply only pending migrations, then deploy the matching Worker. Before the
+migration, inbox reads use existing session indexes; they remain compatible.
+With the new indexes, each incoming/outgoing branch seeks by session and cursor
+and applies filters before bounding each branch to the requested page plus one,
+before results are combined. Self-messages appear once and owner inboxes keep
+their message-ID cursors. Principal, project, review and search filters still
+apply before response pagination.
+
+Positive schema capability checks are cached on the database binding rather
+than each request session. Missing legacy tables are retried; quota or connection
+failures propagate. Index absence is rechecked after one minute, so additive
+migrations can be recognized by warm isolates. Exact registration retries reuse
+the existing receipt without running admission counters or reopening archives.
+
+Compare hosted D1 `rows_read` for representative incoming/conversation inboxes,
+empty incremental pages and alias history before and after rollout. Check actual
+account-wide read/write usage, including index creation and additional indexed
+writes; a query-plan improvement is not a guarantee of future daily capacity.
