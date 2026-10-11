@@ -1,7 +1,7 @@
 import { searchTerm, messageFilters } from './message-filters.mjs';
 import { remoteMcp, isRemoteMcpPath, mcpGrantPredicate, checkMcpGrant } from './remote-mcp.mjs';
 import { accessApi } from './access-api.mjs';
-import {coordinationDatabaseSession,inboxCursorIndexes,hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
+import {coordinationDatabaseSession,inboxCursorIndexes,hasCoordinationSchema,messagePolicy,sessionPolicy,sessionCapacity,explainSessionCapacity,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
@@ -17,8 +17,8 @@ const headers = {
   'Strict-Transport-Security':'max-age=31536000',
   'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
-class HttpError extends Error { constructor(status,code,message){super(message);this.status=status;this.code=code;} }
-const fail = (status,code,message)=>{throw new HttpError(status,code,message);};
+class HttpError extends Error { constructor(status,code,message,details){super(message);this.status=status;this.code=code;this.details=details;} }
+const fail = (status,code,message,details)=>{throw new HttpError(status,code,message,details);};
 const json = (data,status=200)=>Response.json(data,{status,headers});
 const now = ()=>new Date().toISOString();
 const digest = async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -181,7 +181,8 @@ async function api(request,env,delegatedPrincipal=null){
   if(path==='/api/limits'&&method==='GET'){
     if(!coordination)fail(503,'COORDINATION_UPGRADE_REQUIRED','Apply migration 0010 to enable message capacity reporting.');
     const requested=url.searchParams.get('sessionId'),session=requested?await sessionById(db,requested,principal,true,{custodyOnly:true}):null;
-    return json(await messageCapacity(db,messagePolicy(env,fail),principal.id,session?.id??null));
+    const messages=await messageCapacity(db,messagePolicy(env,fail),principal.id,session?.id??null);
+    return json({...messages,sessions:await sessionCapacity(db,sessionPolicy(env,fail),principal.id)});
   }
   if(path==='/api/principals'&&method==='GET'){
     ownerOnly(principal);const rows=await db.prepare("SELECT * FROM principals WHERE id!='hub-accountability' ORDER BY created_at DESC LIMIT 200").all();return json({principals:rows.results.map(principalView)});
@@ -305,7 +306,7 @@ async function api(request,env,delegatedPrincipal=null){
     await requireCurrent(db,principal);
     const registration=await db.prepare(`SELECT id FROM sessions WHERE principal_id=? AND ${identity.uuid?'lower(external_id) IN (?,?)':'external_id IN (?,?)'} ORDER BY CASE WHEN external_id=? THEN 0 ELSE 1 END LIMIT 1`).bind(principal.id,...identity.keys,externalId).first();
     const row=registration?await sessionById(db,registration.id,principal,true):null;
-    if(!row)fail(409,'SESSION_CAPACITY',`Session capacity reached (${capacity.activePrincipal}/${capacity.activeWorkspace} active or ${capacity.retainedPrincipal}/${capacity.retainedWorkspace} retained per principal/workspace). Archiving preserves retained history.`);
+    if(!row)await explainSessionCapacity(db,capacity,principal.id,fail);
     if(canonicalMachine(row.machine,aliases)!==canonicalMachine(machine,aliases)||row.project!==project)fail(409,'SESSION_IDENTITY_CONFLICT','That external session already belongs to a different machine or project.');
     if(row.id===id)await audit(db,principal,'session.registered',id).run();return json({session:sessionView(row,principal,aliases)},row.id===id?201:200);
   }
@@ -502,7 +503,7 @@ export default {
       if(!['GET','HEAD'].includes(request.method))return json({error:{code:'METHOD_NOT_ALLOWED',message:'Use a supported method.'}},405);
       return await env.ASSETS.fetch(request);
     }catch(error){
-      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code))response.headers.set('Retry-After',String(Math.max(1,Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000))));return response;}
+      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message,...error.details}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code))response.headers.set('Retry-After',String(Math.max(1,Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000))));return response;}
       for(let current=error,depth=0;current&&depth<3;current=current.cause,depth++){
         if(typeof current.message==='string'&&current.message.includes("Your account has exceeded D1's free tier daily row read limit")){
           const response=json({error:{code:'STORAGE_READ_QUOTA_EXCEEDED',message:'The Hub storage daily read allowance is exhausted. The owner can review account capacity; the free allowance resets at 00:00 UTC.'}},503);
