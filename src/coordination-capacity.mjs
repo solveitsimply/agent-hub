@@ -22,6 +22,26 @@ export function sessionPolicy(env,fail){
   if(limits.activeWorkspace>2000||limits.activePrincipal>limits.activeWorkspace||limits.retainedPrincipal>limits.retainedWorkspace||limits.activeWorkspace>limits.retainedWorkspace||limits.activePrincipal>limits.retainedPrincipal)fail(503,'INVALID_SESSION_POLICY','Keep active sessions within the 2000-workspace discovery ceiling and retained capacity.');
   return limits;
 }
+// Aggregate capacity only: never return another principal's identity or tasks.
+export async function sessionCapacity(db,limits,principalId){
+  const usage=await db.prepare(`SELECT
+    (SELECT COUNT(*) FROM sessions WHERE principal_id=? AND archived_at IS NULL) AS activePrincipal,
+    (SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL) AS activeWorkspace,
+    (SELECT COUNT(*) FROM sessions WHERE principal_id=?) AS retainedPrincipal,
+    (SELECT COUNT(*) FROM sessions) AS retainedWorkspace`).bind(principalId,principalId).first();
+  const blockedBy=Object.keys(limits).filter(key=>usage[key]>=limits[key]);
+  const warnings=Object.keys(limits).filter(key=>usage[key]>=limits[key]*0.8)
+    .map(scope=>({scope,used:usage[scope],limit:limits[scope],level:blockedBy.includes(scope)?'full':'near'}));
+  return {limits,usage,blockedBy,warnings,warningThreshold:0.8,
+    activeDefinition:'All unarchived registrations, including DONE and BLOCKED.',
+    archiveEffect:'Archiving verified DONE registrations after closeout and claim release frees active capacity only. Retained history remains counted.'};
+}
+export async function explainSessionCapacity(db,limits,principalId,fail){
+  const capacity=await sessionCapacity(db,limits,principalId);
+  if(!capacity.blockedBy.length)fail(409,'SESSION_ADMISSION_CHANGED','Session admission changed; reread the exact registration before retrying.');
+  const full=capacity.blockedBy.map(scope=>`${scope} ${capacity.usage[scope]}/${limits[scope]}`).join(', ');
+  fail(409,'SESSION_CAPACITY',`Session registration blocked by ${full}. These are actual usage/limit counts. ${capacity.archiveEffect} Read /api/limits for all quotas.`,{capacity});
+}
 export async function hasCoordinationSchema(db){
   const key=cacheKey(db);
   if(schemaCache.get(key))return true;

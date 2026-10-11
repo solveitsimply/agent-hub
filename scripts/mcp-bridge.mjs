@@ -30,7 +30,7 @@ const tools = [
     async invoke(client,{sessionId}){return client.request('GET',`/api/sessions/${encodeURIComponent(sessionId)}`);},
   },
   {
-    name:'hub_read_message_limits',description:`Read message budgets and UTC daily reset time for this identity and optionally an owned session. Check after capacity errors; never poll. ${COORDINATION_REMINDER}`,
+    name:'hub_read_message_limits',description:`Read message budgets/reset time and session usage, limits and warnings for this identity. Optional owned session scopes message usage. Unarchived DONE/BLOCKED registrations count as active; archive frees active slots only. Check at work boundaries or after capacity errors; never poll. ${COORDINATION_REMINDER}`,
     inputSchema:schema({sessionId:optionalString}),
     async invoke(client,args){return client.request('GET','/api/limits',{query:args});},
   },
