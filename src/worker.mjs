@@ -1,6 +1,8 @@
 import { searchTerm, messageFilters } from './message-filters.mjs';
+import {admitUsage,usageStatus,limitTraffic,untilUsageReset} from './cost-guard.mjs';
+import { remoteMcp, isRemoteMcpPath, mcpGrantPredicate, checkMcpGrant } from './remote-mcp.mjs';
 import { accessApi } from './access-api.mjs';
-import {hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
+import {coordinationDatabaseSession,inboxCursorIndexes,hasCoordinationSchema,messagePolicy,sessionPolicy,sessionCapacity,explainSessionCapacity,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
@@ -16,8 +18,8 @@ const headers = {
   'Strict-Transport-Security':'max-age=31536000',
   'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
-class HttpError extends Error { constructor(status,code,message){super(message);this.status=status;this.code=code;} }
-const fail = (status,code,message)=>{throw new HttpError(status,code,message);};
+class HttpError extends Error { constructor(status,code,message,details){super(message);this.status=status;this.code=code;this.details=details;} }
+const fail = (status,code,message,details)=>{throw new HttpError(status,code,message,details);};
 const json = (data,status=200)=>Response.json(data,{status,headers});
 const now = ()=>new Date().toISOString();
 const digest = async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -33,9 +35,9 @@ const mayProject = (principal,project)=>principal.role==='owner'||principal.proj
 const requireProject = (principal,project)=>{if(!mayProject(principal,project))fail(403,'PROJECT_DENIED','This invitation does not include that project.');};
 const ownerOnly = principal=>{if(principal.role!=='owner')fail(403,'OWNER_REQUIRED','Only the workspace owner can manage invitations.');};
 const ACTIVE_PRINCIPAL='EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)';
-const messagingAuthority=principal=>principal.capabilitySchema
+const messagingAuthority=principal=>(principal.capabilitySchema
   ? `EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1 AND ${principal.profile==='coordinator'?"access_profile='observer' AND coordinator_access=1":"access_profile='agent' AND coordinator_access=0"})`
-  : ACTIVE_PRINCIPAL;
+  : ACTIVE_PRINCIPAL)+(principal.mcpGrantId?` AND ${mcpGrantPredicate(principal.mcpGrantId,principal.mcpAccessTokenHash)}`:'');
 const dayAgo=()=>new Date(Date.now()-86400000).toISOString();
 const configuredMessageLimit=(environment,name,defaultValue,workspaceMaximum)=>{
   const value=environment[name];
@@ -46,6 +48,7 @@ const configuredMessageLimit=(environment,name,defaultValue,workspaceMaximum)=>{
   return Math.min(parsed,workspaceMaximum);
 };
 async function requireCurrent(db,principal){
+  if(principal.mcpGrantId)await checkMcpGrant(db,principal.mcpGrantId,principal.mcpAccessTokenHash);
   const current=await db.prepare('SELECT * FROM principals WHERE id=? AND active=1').bind(principal.id).first();
   if(!current)fail(401,'UNAUTHORIZED','This invitation has been revoked.');
   if(principal.role!=='owner'&&principalView(current).profile!==principal.profile)fail(403,'ACCESS_CHANGED','Invitation permissions changed; reconnect before continuing.');
@@ -140,7 +143,7 @@ async function sessionById(db,id,principal,own=false,{custodyOnly=false,resolveM
 const MESSAGE_SELECT='SELECT m.*,sender.name AS sender_name,recipient.name AS recipient_name FROM messages m JOIN principals sender ON sender.id=m.from_principal_id JOIN principals recipient ON recipient.id=m.to_principal_id';
 const messageView=(row,principal,conversation=false)=>({id:row.id,fromSessionId:row.from_session_id,toSessionId:row.to_session_id,fromPrincipalId:row.from_principal_id,toPrincipalId:row.to_principal_id,fromPrincipalName:row.sender_name,toPrincipalName:row.recipient_name,project:row.project,kind:row.kind,body:principal.role==='owner'||(conversation&&['observer','coordinator'].includes(principal.profile)&&mayProject(principal,row.project))||(row.review_state==='APPROVED'&&row.to_session_id!==null)?row.body:null,replyTo:row.reply_to,createdAt:row.created_at,acknowledgedAt:row.acknowledged_at,reviewState:row.review_state,reviewedAt:row.reviewed_at,deliveryCursor:row.delivery_id,...(row.owner_relay_reference?{ownerRelay:{source:'delegate-reported',sourceReference:row.owner_relay_reference}}:{}),...(principal.role==='owner'?{payloadHash:row.payload_hash}:{})});
 const requireActive=session=>{if(session?.archived_at)fail(409,'SESSION_ARCHIVED','This session was archived; register a new session for new work.');};
-const audit=(db,principal,action,id)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL} AND CASE WHEN EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?) THEN 0 ELSE (SELECT COUNT(*)<100000 AND COUNT(*) FILTER (WHERE principal_id=?)<10000 FROM audit_events) END`).bind(principal.id,action,String(id),now(),principal.id,principal.id,action,String(id),dayAgo(),principal.id);
+const audit=(db,principal,action,id,afterChange=false)=>db.prepare(`INSERT INTO audit_events(principal_id,action,target_id,created_at) SELECT ?,?,?,? WHERE ${ACTIVE_PRINCIPAL}${afterChange?' AND changes()>0':''} AND CASE WHEN EXISTS(SELECT 1 FROM audit_events WHERE principal_id=? AND action=? AND target_id=? AND created_at>=?) THEN 0 ELSE (SELECT COUNT(*)<100000 AND COUNT(*) FILTER (WHERE principal_id=?)<10000 FROM audit_events) END`).bind(principal.id,action,String(id),now(),principal.id,principal.id,action,String(id),dayAgo(),principal.id);
 async function messageById(db,id,principal){
   const row=await db.prepare(`${MESSAGE_SELECT} WHERE m.id=?`).bind(id).first();
   if(!row)fail(404,'MESSAGE_NOT_FOUND','Message not found.');requireProject(principal,row.project);
@@ -156,14 +159,33 @@ function readOptions(url, maximum) {
   if((raw!==null&&!/^[1-9]\d*$/.test(raw))||!Number.isSafeInteger(limit)||limit<1||limit>maximum)fail(422,'INVALID_LIMIT',`limit must be 1 to ${maximum}.`);
   return {view,limit};
 }
-async function api(request,env){
+async function api(request,env,delegatedPrincipal=null){
   const url=new URL(request.url);const origin=request.headers.get('origin');
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
   if(origin&&origin!==url.origin)fail(403,'ORIGIN_DENIED','Cross-origin coordination requests are disabled.');
   if(!env.DB)fail(503,'NOT_CONFIGURED','Coordination database is not configured.');
-  const db=env.DB.withSession('first-primary');
+  const db=coordinationDatabaseSession(env.DB);
+  // Delegation is an internal call from the already metered MCP transport.
+  if(delegatedPrincipal)return apiWithDatabase(request,env,db,url,delegatedPrincipal);
+  // Owner inspection remains available while ordinary operations are paused.
+  if(url.pathname==='/api/usage'&&request.method==='GET'){
+    if(typeof env.OWNER_TOKEN!=='string'||env.OWNER_TOKEN.length<32)fail(503,'NOT_CONFIGURED','Owner authentication is not configured.');
+    const authorization=request.headers.get('authorization');
+    // Reject non-owner callers without an unmetered database lookup.
+    if(!authorization?.startsWith('Bearer ')||authorization.length>520||!equal(await digest(authorization.slice(7)),await digest(env.OWNER_TOKEN)))fail(403,'OWNER_REQUIRED','Only the workspace owner can inspect usage.');
+    return json(await usageStatus(db,env,fail));
+  }
+  await limitTraffic(request,env,fail);
+  if(!request.headers.get('authorization')?.startsWith('Bearer ')||request.headers.get('authorization').length>520)fail(401,'UNAUTHORIZED','Connect with a valid workspace invitation.');
+  const usage=await admitUsage(db,env,fail);
+  try{const response=await apiWithDatabase(request,env,usage.db,url);if(usage.warning)response.headers.set('X-Hub-Usage-Warning',usage.warning);return response;}
+  catch(error){if(!(error instanceof HttpError))usage.failed?.();throw error;}
+  finally{await usage.finish();}
+}
+async function apiWithDatabase(request,env,db,url,delegatedPrincipal=null){
+  db=coordinationDatabaseSession(env.DB,db);
   if(url.pathname.startsWith('/api/observer/')||url.pathname==='/api/observer'||request.headers.get('authorization')?.startsWith('Bearer hub_observer_'))return observerApi({request,db,path:url.pathname,method:request.method,readBody:()=>bodyOf(request),digest,fail,checkKeys,string,json});
-  const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
+  const principal=delegatedPrincipal??await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
   const path=url.pathname,method=request.method;
   const coordination=await hasCoordinationSchema(db);
@@ -179,7 +201,8 @@ async function api(request,env){
   if(path==='/api/limits'&&method==='GET'){
     if(!coordination)fail(503,'COORDINATION_UPGRADE_REQUIRED','Apply migration 0010 to enable message capacity reporting.');
     const requested=url.searchParams.get('sessionId'),session=requested?await sessionById(db,requested,principal,true,{custodyOnly:true}):null;
-    return json(await messageCapacity(db,messagePolicy(env,fail),principal.id,session?.id??null));
+    const messages=await messageCapacity(db,messagePolicy(env,fail),principal.id,session?.id??null);
+    return json({...messages,sessions:await sessionCapacity(db,sessionPolicy(env,fail),principal.id)});
   }
   if(path==='/api/principals'&&method==='GET'){
     ownerOnly(principal);const rows=await db.prepare("SELECT * FROM principals WHERE id!='hub-accountability' ORDER BY created_at DESC LIMIT 200").all();return json({principals:rows.results.map(principalView)});
@@ -235,6 +258,22 @@ async function api(request,env){
     const status=url.searchParams.get('status');if(status!==null&&status!=='WAITING'&&!STATUSES.has(status))fail(422,'INVALID_FILTER','Select a supported status.');
     const staleOnly=url.searchParams.get('staleOnly');if(staleOnly!==null&&staleOnly!=='1')fail(422,'INVALID_FILTER','staleOnly must be 1.');
     const attention=url.searchParams.get('attention');if(attention!==null&&!ATTENTION.includes(attention))fail(422,'INVALID_FILTER','Select a supported attention category.');
+    if(view==='compact'&&!q&&!attention){
+      // Discover cheap candidates first. Correlated lifecycle/history reads are
+      // evaluated only for the requested page, never the complete inventory.
+      let pageScope=filteredScope;const pageValues=[...filterValues];
+      if(status==='WAITING')pageScope+=" AND s.status IN ('WAITING_ON_USER','WAITING_ON_AGENT')";
+      else if(status!==null){pageScope+=' AND s.status=?';pageValues.push(status);}
+      if(staleOnly!==null){pageScope+=" AND s.status<>'DONE' AND (julianday(?) - julianday(s.last_seen_at))*86400000 > COALESCE(json_extract(s.checkpoint_json,'$.presenceIntervalSeconds'),60)*3000";pageValues.push(now());}
+      const needsAttribution=filters.clauses.some(clause=>clause.includes('a.metadata_json'));
+      const from=needsAttribution?(coordination?sessionHistorySelect(SESSION_FROM):SESSION_FROM):' FROM sessions s';
+      const candidates='SELECT s.id,s.last_seen_at'+from+pageScope;
+      const count=await db.prepare('SELECT COUNT(*) AS total FROM ('+candidates+' LIMIT 2000)').bind(...pageValues).first();
+      const select=coordination?sessionHistorySelect(SESSION_SELECT):SESSION_SELECT;
+      const rows=await db.prepare('WITH page AS MATERIALIZED ('+candidates+' ORDER BY s.last_seen_at DESC,s.id ASC LIMIT ? OFFSET ?) '+select+' WHERE s.id IN (SELECT id FROM page) ORDER BY s.last_seen_at DESC,s.id ASC').bind(...pageValues,limit,offset).all();
+      const total=count.total,hasMore=offset+limit<total;
+      return json({sessions:rows.results.map(row=>compactSession(sessionView(row,principal,aliases))),limit,offset,total,hasMore,nextOffset:hasMore?offset+limit:null});
+    }
     // Admission caps the workspace at 2000 active sessions. Read this authorized
     // baseline once; all counts precede the response page and status filters.
     const listSelect=coordination?sessionHistorySelect(SESSION_LIST_SELECT):SESSION_LIST_SELECT;
@@ -268,7 +307,7 @@ async function api(request,env){
     if(checkpoint?.wait)checkpoint.waitStartedAt=date;
     const identity=registrationKeys(externalId);
     const registered=await db.prepare(`SELECT id,external_id FROM sessions WHERE principal_id=? AND ${identity.uuid?'lower(external_id) IN (?,?)':'external_id IN (?,?)'} ORDER BY CASE WHEN external_id=? THEN 0 ELSE 1 END LIMIT 1`).bind(principal.id,...identity.keys,externalId).first();
-    if(registered&&(registered.external_id!==externalId||await canonicalSessionId(db,registered.id)!==registered.id)){
+    if(registered){
       const current=await sessionById(db,registered.id,principal,true);
       if(canonicalMachine(current.machine,aliases)!==canonicalMachine(machine,aliases)||current.project!==project)fail(409,'SESSION_IDENTITY_CONFLICT','That external chat belongs to another machine or project.');
       if(identity.uuid&&externalId.startsWith('codex:')&&!current.external_id.includes(':')){
@@ -277,7 +316,8 @@ async function api(request,env){
         await audit(db,principal,'session.normalized',current.id).run();
       }
       await requireCurrent(db,principal);
-      const receipt=await sessionById(db,current.id,principal,true);requireActive(receipt);
+      const receipt=await sessionById(db,current.id,principal,true);
+      if(registered.external_id!==externalId||current.id!==registered.id)requireActive(receipt);
       return json({session:sessionView(receipt,principal,aliases)});
     }
     const capacity=coordination?sessionPolicy(env,fail):{activePrincipal:100,activeWorkspace:2000,retainedPrincipal:1000,retainedWorkspace:10000};
@@ -286,7 +326,7 @@ async function api(request,env){
     await requireCurrent(db,principal);
     const registration=await db.prepare(`SELECT id FROM sessions WHERE principal_id=? AND ${identity.uuid?'lower(external_id) IN (?,?)':'external_id IN (?,?)'} ORDER BY CASE WHEN external_id=? THEN 0 ELSE 1 END LIMIT 1`).bind(principal.id,...identity.keys,externalId).first();
     const row=registration?await sessionById(db,registration.id,principal,true):null;
-    if(!row)fail(409,'SESSION_CAPACITY',`Session capacity reached (${capacity.activePrincipal}/${capacity.activeWorkspace} active or ${capacity.retainedPrincipal}/${capacity.retainedWorkspace} retained per principal/workspace). Archiving preserves retained history.`);
+    if(!row)await explainSessionCapacity(db,capacity,principal.id,fail);
     if(canonicalMachine(row.machine,aliases)!==canonicalMachine(machine,aliases)||row.project!==project)fail(409,'SESSION_IDENTITY_CONFLICT','That external session already belongs to a different machine or project.');
     if(row.id===id)await audit(db,principal,'session.registered',id).run();return json({session:sessionView(row,principal,aliases)},row.id===id?201:200);
   }
@@ -328,17 +368,26 @@ async function api(request,env){
     await requireCurrent(db,principal);const current=await sessionById(db,row.id,principal,true);if(!current.archived_at)fail(409,'OWNERSHIP_HELD','Session custody changed; recheck its claims before archiving.');return json({session:sessionView(current,principal,aliases)});
   }
   const sessionMatch=path.match(/^\/api\/sessions\/([^/]+)(\/heartbeat)?$/);
+  if(sessionMatch&&method==='GET'&&!sessionMatch[2])return json({session:sessionView(await sessionById(db,sessionMatch[1],principal),principal,aliases)});
   if(sessionMatch&&((method==='POST'&&sessionMatch[2])||(method==='PATCH'&&!sessionMatch[2]))){
     const row=await sessionById(db,sessionMatch[1],principal,true);requireActive(row);const body=await readBody();let mutation;
-    if(sessionMatch[2]){checkKeys(body,[]);mutation=await db.prepare('UPDATE sessions SET last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(now(),row.id,principal.id,principal.id).run();}
+    if(sessionMatch[2]){checkKeys(body,[]);mutation=await db.prepare(`UPDATE sessions SET last_seen_at=CASE WHEN last_seen_at>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ',last_seen_at,'+0.001 seconds') ELSE ? END WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)`).bind(now(),now(),row.id,principal.id,principal.id).run();}
     else{
-      checkKeys(body,['label','status','task','details','environment','workContext']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
+      checkKeys(body,['label','status','task','details','environment','workContext','expectedRevision','expectedLastSeenAt','requireUnclaimed','requireUnobserved']);const status=body.status??row.status;if(!STATUSES.has(status))fail(422,'INVALID_STATUS','Select a supported session status.');
+      if(body.expectedRevision!==undefined&&(!Number.isSafeInteger(body.expectedRevision)||body.expectedRevision<0))fail(422,'INVALID_REVISION','expectedRevision must be a nonnegative integer.');
+      if(body.expectedLastSeenAt!==undefined&&(typeof body.expectedLastSeenAt!=='string'||!Number.isFinite(Date.parse(body.expectedLastSeenAt))))fail(422,'INVALID_TIMESTAMP','expectedLastSeenAt must be a timestamp from the session receipt.');
+      for(const flag of ['requireUnclaimed','requireUnobserved'])if(body[flag]!==undefined&&body[flag]!==true)fail(422,'INVALID_FIELD',`${flag} must be true when supplied.`);
       const label=body.label===undefined?row.label:string(body.label,'label',120);
       const task=body.task===undefined?row.task:string(body.task,'task',2000),previous=JSON.parse(row.details_json),details=body.details===undefined?previous:detailsOf(body.details);
       if(body.details!==undefined && previous.workContext!==undefined)details.workContext=previous.workContext;
       if(body.workContext!==undefined)details.workContext=parseWorkContext(body.workContext,fail);
       const environment=body.environment===undefined?row.environment:string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use local, dev, staging or production for the target application instance.');
-      const results=await db.batch([db.prepare('UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=? WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)').bind(status,task,label,JSON.stringify(details),environment,now(),row.id,principal.id,principal.id),audit(db,principal,'session.updated',row.id)]);mutation=results[0];
+      let guard='',guardValues=[];
+      if(body.expectedRevision!==undefined){guard+=' AND revision=?';guardValues.push(body.expectedRevision);}
+      if(body.expectedLastSeenAt!==undefined){guard+=' AND last_seen_at=?';guardValues.push(body.expectedLastSeenAt);}
+      if(body.requireUnclaimed)guard+=' AND NOT EXISTS(SELECT 1 FROM ownership WHERE owner_session_id=sessions.id)';
+      if(body.requireUnobserved)guard+=' AND NOT EXISTS(SELECT 1 FROM observer_sessions WHERE session_id=sessions.id)';
+      const results=await db.batch([db.prepare(`UPDATE sessions SET status=?,task=?,label=?,details_json=?,environment=?,last_seen_at=CASE WHEN last_seen_at>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ',last_seen_at,'+0.001 seconds') ELSE ? END WHERE id=? AND principal_id=? AND archived_at IS NULL AND EXISTS(SELECT 1 FROM principals WHERE id=? AND active=1)`+guard).bind(status,task,label,JSON.stringify(details),environment,now(),now(),row.id,principal.id,principal.id,...guardValues),audit(db,principal,'session.updated',row.id,true)]);mutation=results[0];
     }
     await requireCurrent(db,principal);if(!mutation.meta.changes)fail(409,'SESSION_CHANGED','Registration changed before this update; reread the canonical session and retry.');const current=await sessionById(db,row.id,principal,true);requireActive(current);return json({session:sessionView(current,principal,aliases)});
   }
@@ -396,8 +445,18 @@ async function api(request,env){
     const after=numeric(url.searchParams.get('after')??0,'after');const sessionId=url.searchParams.get('sessionId');
     const direction=url.searchParams.get('direction')??'all';
     if(!['all','incoming'].includes(direction)||direction==='incoming'&&!sessionId)fail(422,'INVALID_DIRECTION','Use all, or incoming with an exact sessionId.');
+    const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
+    if(beforeValue!==null&&(after!==0||latest))fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');
+    const before=beforeValue===null?null:numeric(beforeValue,'before');
     let query=MESSAGE_SELECT+` WHERE ${cursorColumn}>?`,values=[after];
-    if(sessionId){const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true}),incoming=await sessionMessageScope(db,session.id,'m.to_session_id');if(direction==='incoming'){query+=' AND '+incoming.sql;values.push(...incoming.values);}else{const outgoing=await sessionMessageScope(db,session.id,'m.from_session_id');query+=' AND ('+outgoing.sql+' OR '+incoming.sql+')';values.push(...outgoing.values,...incoming.values);}}
+    const scopes=[];
+    if(sessionId){
+      const session=await sessionById(db,sessionId,principal,false,{custodyOnly:true});
+      const indexed=await inboxCursorIndexes(db),directions=direction==='incoming'?['to']:['to','from'];
+      for(const side of directions){
+        scopes.push({scope:await sessionMessageScope(db,session.id,`m.${side}_session_id`),index:`messages_${side}_session${indexed&&!owner?'_delivery':''}`});
+      }
+    }
     if(!owner){query+=` AND m.review_state='APPROVED' AND m.to_session_id IS NOT NULL AND (m.from_principal_id=? OR m.to_principal_id=?) AND m.project IN (${principal.projects.map(()=>'?').join(',')})`;values.push(principal.id,principal.id,...principal.projects);}
     const reviewState=url.searchParams.get('reviewState');if(reviewState!==null){ownerOnly(principal);if(!['PENDING','APPROVED','REJECTED'].includes(reviewState))fail(422,'INVALID_REVIEW','Select a supported review state.');query+=' AND m.review_state=?';values.push(reviewState);}
     const filters=messageFilters(url,fail,owner);
@@ -405,9 +464,18 @@ async function api(request,env){
     const project=url.searchParams.get('project');if(project){requireProject(principal,slug(project));query+=' AND m.project=?';values.push(project);}
     const kind=url.searchParams.get('kind');
     if(kind!==null){if(!KINDS.has(kind))fail(422,'INVALID_KIND','Select a supported message kind.');query+=' AND m.kind=?';values.push(kind);}
-    const beforeValue=url.searchParams.get('before'),latest=url.searchParams.get('latest')==='1';
-    if(beforeValue!==null){if(after!==0||latest)fail(422,'INVALID_CURSOR','Use one pagination direction at a time.');query+=` AND ${cursorColumn}<?`;values.push(numeric(beforeValue,'before'));}
+    if(before!==null){query+=` AND ${cursorColumn}<?`;values.push(before);}
     const descending=latest||beforeValue!==null;
+    if(scopes.length){
+      const conditions=query.slice(MESSAGE_SELECT.length),filterValues=[...values],branches=[];
+      for(const {scope,index} of scopes){
+        branches.push(`SELECT id FROM (SELECT m.id FROM messages m INDEXED BY ${index}${conditions} AND ${scope.sql} ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1})`);
+        values.push(...filterValues,...scope.values);
+      }
+      // Each filtered branch needs only the first page plus one. UNION removes
+      // self-message duplicates before the combined page is ordered/limited.
+      query+=' AND m.id IN ('+branches.join(' UNION ')+')';
+    }
     const rows=await db.prepare(query+` ORDER BY ${cursorColumn} ${descending?'DESC':'ASC'} LIMIT ${limit+1}`).bind(...values).all();
     const hasMore=rows.results.length>limit,page=rows.results.slice(0,limit);
     const ordered=descending?page.reverse():page;
@@ -446,15 +514,22 @@ export default {
     try{
       const url=new URL(request.url),path=url.pathname;
       if(url.protocol==='http:'&&!['localhost','127.0.0.1','[::1]'].includes(url.hostname)){
-        if(path.startsWith('/api/'))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
+        if(path.startsWith('/api/')||isRemoteMcpPath(path))fail(403,'HTTPS_REQUIRED','Use HTTPS for hosted coordination.');
         url.protocol='https:';return Response.redirect(url.href,308);
       }
       if(path==='/health'&&request.method==='GET')return json({ok:true,service:'agent-hub'});
+      if(isRemoteMcpPath(path)){
+        await limitTraffic(request,env,fail);
+        let usage;
+        try{const response=await remoteMcp({request,env,authenticate,principalView,api,prepareDatabase:async DB=>{usage=await admitUsage(coordinationDatabaseSession(DB),env,fail);return coordinationDatabaseSession(DB,{...usage.db,withSession(){return usage.db;}});}});if(usage?.warning)response.headers.set('X-Hub-Usage-Warning',usage.warning);return response;}
+        catch(error){if(!(error instanceof HttpError))usage?.failed?.();throw error;}
+        finally{await usage?.finish();}
+      }
       if(path.startsWith('/api/'))return await api(request,env);
       if(!['GET','HEAD'].includes(request.method))return json({error:{code:'METHOD_NOT_ALLOWED',message:'Use a supported method.'}},405);
       return await env.ASSETS.fetch(request);
     }catch(error){
-      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code))response.headers.set('Retry-After',String(Math.max(1,Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000))));return response;}
+      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message,...error.details}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code)||error.code==='HUB_DAILY_BUDGET')response.headers.set('Retry-After',untilUsageReset());if(error.code==='HUB_RATE_LIMITED')response.headers.set('Retry-After','60');return response;}
       for(let current=error,depth=0;current&&depth<3;current=current.cause,depth++){
         if(typeof current.message==='string'&&current.message.includes("Your account has exceeded D1's free tier daily row read limit")){
           const response=json({error:{code:'STORAGE_READ_QUOTA_EXCEEDED',message:'The Hub storage daily read allowance is exhausted. The owner can review account capacity; the free allowance resets at 00:00 UTC.'}},503);
@@ -470,9 +545,14 @@ export default {
     // except the existing daily retention window, and never send check-ins.
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCHours()!==3)return;
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCMinutes()!==17)return;
+    if(env.HUB_PAUSED==='true')return;
+    const usage=await admitUsage(env.DB,env,fail),db=usage.db;
+    try{
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();
-    await env.DB.batch([env.DB.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),env.DB.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
-    if(await hasCoordinationSchema(env.DB))await env.DB.prepare('DELETE FROM hub_message_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
-    try{await env.DB.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
+    await db.batch([db.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),db.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
+    if(await hasCoordinationSchema(db))await db.prepare('DELETE FROM hub_message_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
+    try{await db.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
+    if(env.HUB_USAGE_LIMITS_JSON!==undefined)await db.prepare('DELETE FROM hub_daily_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
+    }catch(error){if(!(error instanceof HttpError))usage.failed?.();throw error;}finally{await usage.finish();}
   },
 };

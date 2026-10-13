@@ -17,6 +17,7 @@
     registering: false,
     sessionFilterOptions: { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] },
     sessionSummary: null,
+    sessionCapacity: null,
     sessionTotal: 0,
     sessionLimit: 200,
     messages: [],
@@ -62,6 +63,7 @@
     connectPanel: $('connect-panel'), connectForm: $('connect-form'), connectToken: $('hub-token'),
     workspace: $('workspace'), connection: $('connection-state'), refresh: $('refresh-button'), logout: $('logout-button'),
     summary: $('principal-summary'), sessions: $('session-list'), sessionEmpty: $('session-empty'),
+    capacity: $('session-capacity'),
     copyAgentSetup: $('copy-agent-setup'), setupFallback: $('agent-setup-fallback'), setupText: $('agent-setup-text'), closeSetup: $('close-agent-setup'),
     summaryRunning: $('summary-running'), summaryWaitingUser: $('summary-waiting-user'), summaryWaitingAgent: $('summary-waiting-agent'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
     sessionSearch: $('session-search'), messageSearch: $('message-search'),
@@ -82,6 +84,7 @@
     registrationLabel: $('registration-label'), registrationTask: $('registration-task'), registerSession: $('register-session'), cancelRegistration: $('cancel-registration'), registrationMessage: $('registration-message'),
     messageBody: $('message-body'), sendMessage: $('send-message'), composeAs: $('compose-as'), replyContext: $('reply-context'),
     ownerTools: $('owner-tools'), inviteForm: $('invite-form'), inviteMessage: $('invite-message'), principalList: $('principal-list'),
+    refreshUsage: $('refresh-usage'), usageStatus: $('usage-status'),
     connectionHistory: $('connection-history'), connectionList: $('connection-list'), connectionStatus: $('connection-history-status'), refreshConnections: $('refresh-connections'), olderConnections: $('older-connections'),
     tokenPanel: $('one-time-token'), tokenValue: $('invite-token-value'), dismissToken: $('dismiss-token'), toast: $('toast'),
   };
@@ -160,6 +163,8 @@
         redirect: 'error',
       });
       if (generation !== state.generation) throw new StaleRequestError();
+      const usageWarning = response.headers.get('X-Hub-Usage-Warning');
+      if (isOwner() && usageWarning) el.usageStatus.textContent = `${usageWarning === 'critical' ? 'Critical usage warning' : 'Usage warning'}: a daily Hub budget has reached ${usageWarning === 'critical' ? '85' : '70'}%. Use Check usage for details. This is not your Cloudflare bill.`;
       let payload;
       try { payload = await response.json(); } catch { payload = null; }
       if (generation !== state.generation) throw new StaleRequestError();
@@ -184,6 +189,10 @@
   }
 
   function showConnection(connected) {
+    if (!connected) {
+      el.refreshUsage.disabled = false;
+      el.usageStatus.textContent = "Check usage to view today's budget. This is not your Cloudflare bill.";
+    }
     el.connectPanel.hidden = connected;
     el.workspace.hidden = !connected;
     el.refresh.hidden = !connected;
@@ -767,6 +776,20 @@
     renderPrincipals();
   }
 
+  el.refreshUsage.addEventListener('click', async () => {
+    if (!isOwner()) return;
+    const generation = state.generation;
+    el.refreshUsage.disabled = true;
+    try {
+      const usage = await request('/usage');
+      if (generation !== state.generation) return;
+      const percent = usage.enabled ? Math.ceil(100 * Math.max(...Object.keys(usage.used).map(key => usage.used[key] / usage.limits[key]))) : 0;
+      el.usageStatus.textContent = usage.paused ? 'Hub operations are paused by the owner.' : !usage.enabled ? 'Daily usage protection is not enabled. Ask the hosting owner to configure it.' : `${usage.warning === 'critical' ? 'Critical warning: ' : usage.warning ? 'Usage warning: ' : ''}${percent}% of the largest daily Hub budget used. ${usage.used.requests.toLocaleString()} requests today. Resets at 00:00 UTC. This is not account-wide billing usage.`;
+    } catch (error) {
+      if (generation === state.generation) el.usageStatus.textContent = error.message || 'Usage could not be checked.';
+    } finally { if (generation === state.generation) el.refreshUsage.disabled = false; }
+  });
+
   function renderPrincipals() {
     clear(el.principalList);
     const invites = state.principals.filter((principal) => principal.role === 'agent' && principal.active === true);
@@ -843,6 +866,23 @@
         };
       }
       state.sessionSummary = sessionPayload.summary ?? null;
+      try {
+        const budgets = await request('/limits');
+        if (generation !== state.generation) return;
+        state.sessionCapacity = budgets.sessions ?? null;
+      } catch (error) {
+        if (error instanceof StaleRequestError) throw error;
+        state.sessionCapacity = null;
+      }
+      const capacity = state.sessionCapacity;
+      el.capacity.hidden = !capacity;
+      el.capacity.classList.toggle('capacity-warning', Boolean(capacity?.warnings?.length));
+      if (capacity) {
+        const labels = {activePrincipal:'Your account unarchived',activeWorkspace:'Workspace unarchived',retainedPrincipal:'Your account history',retainedWorkspace:'Workspace history'};
+        el.capacity.textContent = Object.keys(labels).map(key => `${labels[key]}: ${capacity.usage[key]}/${capacity.limits[key]}`).join(' · ')
+          + (capacity.warnings.length ? ' · Capacity warning: ' + capacity.warnings.map(item => `${labels[item.scope]} ${item.level === 'full' ? 'full' : 'at least 80% used'}`).join('; ') : '')
+          + '. DONE and BLOCKED count until archived; archiving frees unarchived slots only.';
+      }
       state.sessionTotal = Number.isFinite(sessionPayload.total) ? sessionPayload.total : state.sessions.length;
       state.sessionLimit = Number.isFinite(sessionPayload.limit) && sessionPayload.limit > 0 ? sessionPayload.limit : 200;
       if (state.selectedSessionId) {
@@ -1093,6 +1133,9 @@
     state.token = null;
     state.principal = null;
     state.sessions = [];
+    state.sessionCapacity = null;
+    el.capacity.hidden = true;
+    el.capacity.textContent = '';
     state.preferredSenderId = '';
     state.registering = false;
     el.registrationForm.reset();

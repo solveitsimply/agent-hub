@@ -219,3 +219,153 @@ test('authenticated D1 row-read quota errors are retryable and unexpected storag
   assert.ok(!JSON.stringify(failure.body).includes('secret_column'));
   assert.equal(failure.headers.get('retry-after'),null);
 });
+
+test('capability detection survives new request sessions and keeps databases isolated',async t=>{
+  const {coordinationDatabaseSession,hasCoordinationSchema,inboxCursorIndexes}=await import('../src/coordination-capacity.mjs');
+  const f=fixture(t),old=fixture(t,{throughMigration:'0009'}),statements=[];
+  const binding={withSession(){return {prepare(sql){statements.push(sql);return f.DB.prepare(sql);}};}};
+  for(let i=0;i<4;i++){
+    const db=coordinationDatabaseSession(binding);
+    assert.equal(await hasCoordinationSchema(db),true);
+    assert.equal(await inboxCursorIndexes(db),true);
+  }
+  assert.equal(statements.filter(sql=>sql==='SELECT scope FROM hub_message_usage LIMIT 0').length,1);
+  assert.equal(statements.filter(sql=>sql.includes("type='index'")).length,1);
+  assert.ok(!statements.some(sql=>sql.includes("type='table'")));
+  const oldBinding={withSession(){return {prepare:sql=>old.DB.prepare(sql)};}};
+  assert.equal(await hasCoordinationSchema(coordinationDatabaseSession(oldBinding)),false);
+  old.DB.database.exec((await import('node:fs')).readFileSync(new URL('../migrations/0010_coordination_capacity.sql',import.meta.url),'utf8'));
+  assert.equal(await hasCoordinationSchema(coordinationDatabaseSession(oldBinding)),true,'uncached absence sees a live additive migration');
+  const broken={withSession(){return {prepare(){throw new Error('D1 quota exhausted');}};}};
+  await assert.rejects(()=>hasCoordinationSchema(coordinationDatabaseSession(broken)),/quota exhausted/);
+});
+
+test('chat inbox seeks chat and delivery cursor despite unrelated history, preserving self-message deduplication',async t=>{
+  const f=fixture(t),a=await invite(f,'efficient',['alpha']),b=await invite(f,'peer-efficient',['alpha']);
+  const x=await register(f,a.token,'alpha','RUNNING','reader'),y=await register(f,b.token,'alpha','RUNNING','writer');
+  const send=async(token,from,to,key)=>{
+    const r=await f.call(token,'/api/messages',{project:'alpha',fromSessionId:from,toSessionId:to,kind:'NOTE',body:key,idempotencyKey:key});
+    assert.equal(r.status,201);return r.body.message;
+  };
+  const first=await send(b.token,y.id,x.id,'first-seek'),self=await send(a.token,x.id,x.id,'self-seek');
+  const last=await send(b.token,y.id,x.id,'last-seek');
+  const unrelated=f.DB.database.prepare('INSERT INTO messages(from_principal_id,to_principal_id,from_session_id,to_session_id,project,kind,body,idempotency_key,payload_hash,created_at,review_state,delivery_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+  for(let i=0;i<2000;i++)unrelated.run(b.principal.id,b.principal.id,y.id,y.id,'alpha','NOTE','unrelated','unrelated-'+i,'hash-'+i,new Date().toISOString(),'APPROVED',10000+i);
+  const captured=[],prepare=f.DB.prepare.bind(f.DB);
+  f.DB.prepare=sql=>{const statement=prepare(sql),bind=statement.bind;statement.bind=(...params)=>{if(sql.startsWith('SELECT m.*,sender'))captured.push({sql,params});return bind(...params);};return statement;};
+  const result=await f.call(a.token,`/api/messages?sessionId=${x.id}&after=${first.deliveryCursor}&view=compact&limit=1`);
+  assert.deepEqual(result.body.messages.map(m=>m.id),[self.id]);assert.equal(result.body.hasMore,true);
+  const next=await f.call(a.token,`/api/messages?sessionId=${x.id}&after=${result.body.nextCursor}&view=compact&limit=1`);
+  assert.deepEqual(next.body.messages.map(m=>m.id),[last.id]);
+  const before=await f.call(a.token,`/api/messages?sessionId=${x.id}&before=${last.deliveryCursor}&view=compact&limit=2`);
+  assert.deepEqual(before.body.messages.map(m=>m.id),[first.id,self.id]);
+  const incoming=await f.call(a.token,`/api/messages?sessionId=${x.id}&direction=incoming&after=${last.deliveryCursor}`);
+  assert.deepEqual(incoming.body.messages,[]);assert.equal(incoming.body.nextCursor,last.deliveryCursor);
+  const plans=captured.map(({sql,params})=>f.DB.database.prepare('EXPLAIN QUERY PLAN '+sql).all(...params).map(r=>r.detail));
+  for(const plan of plans){
+    assert.ok(plan.some(d=>/messages_to_session_delivery .*to_session_id=\? AND delivery_id>\?/.test(d)),plan.join('\n'));
+    assert.ok(!plan.some(d=>/SEARCH m USING INDEX messages_project_id \(project=\?\)$/.test(d)),plan.join('\n'));
+  }
+  assert.ok(plans[0].some(d=>d.includes('messages_from_session_delivery')));
+  assert.ok(plans[2].some(d=>d.includes('delivery_id>? AND delivery_id<?')));
+  assert.equal((await f.call(b.token,`/api/messages?sessionId=${x.id}`)).body.messages.length,2,'project peer sees its own conversation, not another principal self-message');
+  assert.ok(captured[0].sql.includes('ORDER BY m.delivery_id ASC LIMIT 2'),'each branch bounds candidates to the requested page plus one');
+  for(let i=0;i<200;i++)unrelated.run(b.principal.id,a.principal.id,y.id,x.id,'alpha',i===199?'HANDOFF':'NOTE',i===199?'needle beyond the first page':'ordinary history','related-'+i,'related-hash-'+i,new Date().toISOString(),'APPROVED',20000+i);
+  const searched=await f.call(a.token,`/api/messages?sessionId=${x.id}&q=needle&view=compact&limit=1`);
+  assert.equal(searched.body.messages.length,1);assert.equal(searched.body.messages[0].body,'needle beyond the first page');assert.equal(searched.body.hasMore,false,'search applies before branch limits');
+  const kind=await f.call(a.token,`/api/messages?sessionId=${x.id}&kind=HANDOFF&view=compact&limit=1`);
+  assert.deepEqual(kind.body.messages.map(m=>m.id),searched.body.messages.map(m=>m.id),'kind filters apply before branch limits');
+  const latest=await f.call(a.token,`/api/messages?sessionId=${x.id}&latest=1&view=compact&limit=1`);
+  assert.deepEqual(latest.body.messages.map(m=>m.id),searched.body.messages.map(m=>m.id));assert.equal(latest.body.hasMore,true);
+});
+
+test('repeat exact registration avoids admission scans without reopening archived or foreign identities',async t=>{
+  const f=fixture(t),a=await invite(f,'register-efficient',['alpha']),other=await invite(f,'foreign-register',['alpha']);
+  const request={externalId:'repeat-fixture',machine:'reader',label:'Original',project:'alpha',task:'Original task',status:'RUNNING'};
+  const first=await f.call(a.token,'/api/sessions',request);assert.equal(first.status,201);
+  f.env.SESSION_LIMITS_JSON=JSON.stringify({activePrincipal:1,activeWorkspace:1,retainedPrincipal:1,retainedWorkspace:1});
+  const statements=[],prepare=f.DB.prepare.bind(f.DB);f.DB.prepare=sql=>{statements.push(sql);return prepare(sql);};
+  const repeat=await f.call(a.token,'/api/sessions',{...request,label:'Must not overwrite',status:'DONE'});
+  assert.equal(repeat.status,200);assert.equal(repeat.body.session.id,first.body.session.id);assert.equal(repeat.body.session.label,'Original');assert.equal(repeat.body.session.status,'RUNNING');
+  assert.ok(!statements.some(sql=>sql.startsWith('INSERT INTO sessions')),'no quota scan for an existing registration');
+  assert.equal((await f.call(a.token,'/api/sessions',{...request,machine:'different'})).status,409);
+  assert.equal((await f.call(other.token,'/api/sessions',request)).status,409,'foreign principal cannot reuse capacity or identity');
+  f.DB.database.prepare('UPDATE sessions SET archived_at=? WHERE id=?').run(new Date().toISOString(),first.body.session.id);
+  const archived=await f.call(a.token,'/api/sessions',request);assert.equal(archived.status,200);assert.ok(archived.body.session.archivedAt,'read-only retry preserves archived receipt');
+});
+
+test('compact pagination hydrates only the page and preserves authorized filters and counts',async t=>{
+  const f=fixture(t),actor=await invite(f,'page-reader',['alpha']),foreign=await invite(f,'page-foreign',['beta']);
+  const ids=[];
+  for(let i=0;i<27;i++){
+    const row=await register(f,actor.token,'alpha',i%3===0?'WAITING_ON_AGENT':'RUNNING','page-machine');ids.push(row.id);
+    f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run('2020-01-01T00:00:00.000Z',row.id);
+  }
+  const hidden=await register(f,foreign.token,'beta','RUNNING','page-machine');
+  const prepare=f.DB.prepare.bind(f.DB),hydrated=[],queries=[];
+  f.DB.prepare=sql=>{
+    queries.push(sql);const statement=prepare(sql),all=statement.all.bind(statement);
+    statement.all=async()=>{const result=await all();if(sql.includes('SELECT s.*,p.name AS principal_name'))hydrated.push(...result.results.map(row=>row.id));return result;};return statement;
+  };
+  const first=(await f.call(actor.token,'/api/sessions?view=compact&limit=4')).body;
+  assert.equal(first.total,27);assert.equal(first.nextOffset,4);assert.equal(first.sessions.length,4);
+  assert.equal(hydrated.length,4,'only returned cards load lifecycle details');
+  assert.ok(queries.some(sql=>sql.startsWith('WITH page AS MATERIALIZED')));
+  assert.ok(!queries.some(sql=>sql.includes('GROUP BY owner_session_id')),'compact pages never aggregate all claims');
+  const second=(await f.call(actor.token,'/api/sessions?view=compact&limit=4&offset=4')).body;
+  assert.equal(second.total,27);assert.ok(second.sessions.every(row=>!first.sessions.some(previous=>previous.id===row.id)));
+  const full=(await f.call(actor.token,'/api/sessions?view=full&status=WAITING&staleOnly=1')).body;
+  const filtered=(await f.call(actor.token,'/api/sessions?view=compact&status=WAITING&staleOnly=1&limit=200')).body;
+  assert.equal(filtered.total,9);assert.deepEqual(filtered.sessions.map(row=>row.id),full.sessions.map(row=>row.id));
+  const empty=(await f.call(actor.token,'/api/sessions?view=compact&offset=2000')).body;
+  assert.equal(empty.total,27);assert.deepEqual(empty.sessions,[]);assert.equal(empty.hasMore,false);
+  assert.equal((await f.call(actor.token,'/api/sessions?view=compact&project=beta')).status,403);
+  assert.equal((await f.call(actor.token,'/api/sessions/'+hidden.id)).status,403);
+  const receipt=await f.call(actor.token,'/api/sessions/'+ids[0]);assert.equal(receipt.status,200);assert.equal(receipt.body.session.id,ids[0]);
+  assert.equal((await f.call(actor.token,'/api/sessions/missing')).status,404);
+});
+
+test('guarded reconciliation refuses newer reports, heartbeats and held ownership',async t=>{
+  const f=fixture(t),actor=await invite(f,'guard-reader',['alpha']),row=await register(f,actor.token,'alpha','RUNNING','machine');
+  const receipt=(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+  const update={status:'BLOCKED',expectedRevision:receipt.lifecycle.revision,expectedLastSeenAt:receipt.lastSeenAt,requireUnclaimed:true};
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,{...update,expectedRevision:999},'PATCH')).status,409);
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,{...update,expectedLastSeenAt:'2000-01-01T00:00:00.000Z'},'PATCH')).status,409);
+  f.DB.database.prepare('INSERT INTO ownership VALUES (?,?,?,?)').run('alpha','active-work',row.id,new Date().toISOString());
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH')).status,409);
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id)).body.session.status,'RUNNING');
+  f.DB.database.prepare('DELETE FROM ownership WHERE owner_session_id=?').run(row.id);
+  const result=await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH');assert.equal(result.status,200);assert.equal(result.body.session.status,'BLOCKED');
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH')).status,409,'a stale reconciliation cannot repeat after the material revision changes');
+});
+
+test('guarded reconciliation rejects real same-clock heartbeat and material report without a false audit',async t=>{
+  const f=fixture(t),actor=await invite(f,'fixed-clock-reader',['alpha']),row=await register(f,actor.token,'alpha','RUNNING','machine');
+  const OriginalDate=Date,fixed='2026-10-10T12:00:00.000Z';
+  globalThis.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[fixed]));}static now(){return OriginalDate.parse(fixed);}};
+  try{
+    f.DB.database.prepare('UPDATE sessions SET last_seen_at=? WHERE id=?').run(fixed,row.id);
+    const read=async()=>(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+    const reconcile=receipt=>f.call(actor.token,'/api/sessions/'+row.id,{status:'BLOCKED',expectedRevision:receipt.lifecycle.revision,expectedLastSeenAt:receipt.lastSeenAt,requireUnclaimed:true},'PATCH');
+    const auditCount=()=>f.DB.database.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='session.updated' AND target_id=?").get(row.id).n;
+    let receipt=await read();assert.equal(receipt.lastSeenAt,fixed);
+    assert.equal((await f.call(actor.token,'/api/sessions/'+row.id+'/heartbeat',{})).status,200);
+    assert.equal((await read()).lastSeenAt,'2026-10-10T12:00:00.001Z');
+    assert.equal((await reconcile(receipt)).status,409);assert.equal(auditCount(),0,'a rejected guard must not audit a successful update');
+    receipt=await read();
+    assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,{task:'Actual active work reported'},'PATCH')).status,200);
+    const current=await read();assert.equal(current.lastSeenAt,'2026-10-10T12:00:00.002Z');assert.ok(current.lifecycle.revision>receipt.lifecycle.revision);
+    assert.equal((await reconcile(receipt)).status,409);assert.equal((await read()).task,'Actual active work reported');assert.equal(auditCount(),1);
+  }finally{globalThis.Date=OriginalDate;}
+});
+
+test('guarded placeholder reconciliation refuses a native observer enrolled after the receipt',async t=>{
+  const f=fixture(t),actor=await invite(f,'native-guard-reader',['alpha']),row=await register(f,actor.token,'alpha','RUNNING','machine');
+  const receipt=(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+  f.DB.database.prepare('INSERT INTO observers(id,name,token_hash,created_at,expires_at) VALUES (?,?,?,?,?)').run('guard-observer','Synthetic observer','synthetic-hash',new Date().toISOString(),'2099-01-01T00:00:00.000Z');
+  f.DB.database.prepare('INSERT INTO observer_sessions(session_id,observer_id,native_id,state,observed_at,received_at) VALUES (?,?,?,?,?,?)').run(row.id,'guard-observer','synthetic-native','active',new Date().toISOString(),new Date().toISOString());
+  const update={status:'BLOCKED',expectedRevision:receipt.lifecycle.revision,expectedLastSeenAt:receipt.lastSeenAt,requireUnclaimed:true,requireUnobserved:true};
+  assert.equal((await f.call(actor.token,'/api/sessions/'+row.id,update,'PATCH')).status,409);
+  const current=(await f.call(actor.token,'/api/sessions/'+row.id)).body.session;
+  assert.equal(current.status,'RUNNING');assert.equal(current.lifecycle.observation.state,'active');assert.equal(current.lifecycle.revision,receipt.lifecycle.revision);assert.equal(current.lastSeenAt,receipt.lastSeenAt);
+});
