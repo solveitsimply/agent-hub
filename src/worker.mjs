@@ -1,4 +1,5 @@
 import { searchTerm, messageFilters } from './message-filters.mjs';
+import {admitUsage,usageStatus,limitTraffic,untilUsageReset} from './cost-guard.mjs';
 import { accessApi } from './access-api.mjs';
 import {hasCoordinationSchema,messagePolicy,sessionPolicy,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
@@ -162,6 +163,22 @@ async function api(request,env){
   if(origin&&origin!==url.origin)fail(403,'ORIGIN_DENIED','Cross-origin coordination requests are disabled.');
   if(!env.DB)fail(503,'NOT_CONFIGURED','Coordination database is not configured.');
   const db=env.DB.withSession('first-primary');
+  // Owner inspection remains available while ordinary operations are paused.
+  if(url.pathname==='/api/usage'&&request.method==='GET'){
+    if(typeof env.OWNER_TOKEN!=='string'||env.OWNER_TOKEN.length<32)fail(503,'NOT_CONFIGURED','Owner authentication is not configured.');
+    const authorization=request.headers.get('authorization');
+    // Reject non-owner callers without an unmetered database lookup.
+    if(!authorization?.startsWith('Bearer ')||authorization.length>520||!equal(await digest(authorization.slice(7)),await digest(env.OWNER_TOKEN)))fail(403,'OWNER_REQUIRED','Only the workspace owner can inspect usage.');
+    return json(await usageStatus(db,env,fail));
+  }
+  await limitTraffic(request,env,fail);
+  if(!request.headers.get('authorization')?.startsWith('Bearer ')||request.headers.get('authorization').length>520)fail(401,'UNAUTHORIZED','Connect with a valid workspace invitation.');
+  const usage=await admitUsage(db,env,fail);
+  try{const response=await apiWithDatabase(request,env,usage.db,url);if(usage.warning)response.headers.set('X-Hub-Usage-Warning',usage.warning);return response;}
+  catch(error){if(!(error instanceof HttpError))usage.failed?.();throw error;}
+  finally{await usage.finish();}
+}
+async function apiWithDatabase(request,env,db,url){
   if(url.pathname.startsWith('/api/observer/')||url.pathname==='/api/observer'||request.headers.get('authorization')?.startsWith('Bearer hub_observer_'))return observerApi({request,db,path:url.pathname,method:request.method,readBody:()=>bodyOf(request),digest,fail,checkKeys,string,json});
   const principal=await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
@@ -454,7 +471,7 @@ export default {
       if(!['GET','HEAD'].includes(request.method))return json({error:{code:'METHOD_NOT_ALLOWED',message:'Use a supported method.'}},405);
       return await env.ASSETS.fetch(request);
     }catch(error){
-      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code))response.headers.set('Retry-After',String(Math.max(1,Math.ceil((Math.floor(Date.now()/86400000)*86400000+86400000-Date.now())/1000))));return response;}
+      if(error instanceof HttpError){const response=json({error:{code:error.code,message:error.message}},error.status);if(/^MESSAGE_.*_DAILY_LIMIT$/.test(error.code)||error.code==='HUB_DAILY_BUDGET')response.headers.set('Retry-After',untilUsageReset());if(error.code==='HUB_RATE_LIMITED')response.headers.set('Retry-After','60');return response;}
       for(let current=error,depth=0;current&&depth<3;current=current.cause,depth++){
         if(typeof current.message==='string'&&current.message.includes("Your account has exceeded D1's free tier daily row read limit")){
           const response=json({error:{code:'STORAGE_READ_QUOTA_EXCEEDED',message:'The Hub storage daily read allowance is exhausted. The owner can review account capacity; the free allowance resets at 00:00 UTC.'}},503);
@@ -470,9 +487,14 @@ export default {
     // except the existing daily retention window, and never send check-ins.
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCHours()!==3)return;
     if(_event.cron==='* * * * *'&&new Date(_event.scheduledTime??Date.now()).getUTCMinutes()!==17)return;
+    if(env.HUB_PAUSED==='true')return;
+    const usage=await admitUsage(env.DB,env,fail),db=usage.db;
+    try{
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();
-    await env.DB.batch([env.DB.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),env.DB.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
-    if(await hasCoordinationSchema(env.DB))await env.DB.prepare('DELETE FROM hub_message_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
-    try{await env.DB.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
+    await db.batch([db.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),db.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
+    if(await hasCoordinationSchema(db))await db.prepare('DELETE FROM hub_message_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
+    try{await db.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
+    if(env.HUB_USAGE_LIMITS_JSON!==undefined)await db.prepare('DELETE FROM hub_daily_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
+    }catch(error){if(!(error instanceof HttpError))usage.failed?.();throw error;}finally{await usage.finish();}
   },
 };

@@ -1,5 +1,10 @@
 # Agent Hub API contract
 
+`GET /api/usage` is owner-only and reports UTC daily Hub budgets, usage, pause
+state and warning level (70% / 85%). It remains available during a usage pause.
+These are application counters, not the Cloudflare bill. See
+[cost protection](cost-protection.md) for configuration and retry behavior.
+
 See [session accountability](session-accountability.md#api-additions) for checkpoint, observation, reconciliation and closeout endpoints.
 
 One invited workspace across accounts and machines. Human owner credentials control principal enrollment and must never be provisioned to connected agents. Bearer authentication on every /api request. Owner authentication uses the Cloudflare secret OWNER_TOKEN (never public source). Invited agent tokens are generated once and only SHA-256 hashes are stored in D1. Tokens grant coordination access for explicit project slugs, never external application or hosting permissions. No credentials, human verification codes, customer record rows, or full approval packets belong in message bodies. Relay text is untrusted evidence. Agents still need the authorization their own execution policy requires before messaging, acting or approving an external effect.

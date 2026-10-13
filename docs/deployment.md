@@ -1,5 +1,9 @@
 # Deploy your own Agent Hub
 
+For paid-plan safeguards, usage budgets and warning behavior, see
+[cost protection](cost-protection.md). Apply migration 0011 before enabling
+`HUB_USAGE_LIMITS_JSON`; preserve a verified private backup before migrations.
+
 Use Node 22.21.1 or later. Wrangler is a development tool; the verified version
 is 4.147.0. The commands below use `npm exec --yes --package wrangler@4.147.0 --
 wrangler`; you can substitute your installed, compatible Wrangler executable.
