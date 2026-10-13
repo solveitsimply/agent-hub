@@ -50,6 +50,18 @@ test('missing D1 metadata retains reservation and prevents subsequent database w
   await assert.rejects(usage.db.prepare('SELECT 2').all(),{code:'HUB_REQUEST_BUDGET'});
   await usage.finish();assert.equal((await usageStatus(f.db,f.env,fail)).used.rowsRead,1000000);
 });
+test('a SQL failure caught inside a transport still retains the usage reservation',async t=>{
+  const f=fixture(t),usage=await admitUsage(f.db,f.env,fail);
+  await assert.rejects(usage.db.prepare('SELECT * FROM nonexistent_fixture_table').all());
+  await usage.finish();assert.equal((await usageStatus(f.db,f.env,fail)).used.rowsRead,1000000);
+});
+test('remote OAuth metadata shares the daily budget and cannot bypass a pause',async t=>{
+  const f=fixture(t,{requests:1});f.env.MCP_ORIGIN='https://hub.test';f.env.MCP_OAUTH_CLIENTS_JSON='[]';
+  assert.equal((await f.call('/.well-known/oauth-authorization-server')).status,200);
+  assert.equal((await usageStatus(f.db,f.env,fail)).used.requests,1);
+  assert.equal((await f.call('/.well-known/oauth-authorization-server')).status,429);
+  f.env.HUB_PAUSED='true';assert.equal((await f.call('/.well-known/oauth-authorization-server')).status,503);
+});
 test('invalid configuration and missing schema fail closed, with no coordination mutation',async t=>{
   const f=fixture(t);f.raw.database.exec('DROP TABLE hub_daily_usage');
   const response=await f.call();assert.equal(response.status,503);assert.equal((await response.json()).error.code,'USAGE_GUARD_UNAVAILABLE');

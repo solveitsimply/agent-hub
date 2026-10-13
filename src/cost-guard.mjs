@@ -54,12 +54,12 @@ export async function admitUsage(db,env,fail){
     const original=()=>db.prepare(query).bind(...parameters);
     const statement={
       bind(...values){return wrap(query,values);},
-      async all(){check();return record(await original().all());},
-      async run(){check();return record(await original().run());},
+      async all(){check();try{return record(await original().all());}catch(error){unknown=true;throw error;}},
+      async run(){check();try{return record(await original().run());}catch(error){unknown=true;throw error;}},
       async first(column){
         check();
         // Bound the result, preserving first() semantics and exposing D1 meta.
-        const result=record(await db.prepare(`SELECT * FROM (${query}) LIMIT 1`).bind(...parameters).all());
+        let result;try{result=record(await db.prepare(`SELECT * FROM (${query}) LIMIT 1`).bind(...parameters).all());}catch(error){unknown=true;throw error;}
         const row=result.results?.[0]??null;return column?(row?.[column]??null):row;
       },
     };
@@ -67,7 +67,7 @@ export async function admitUsage(db,env,fail){
   };
   return {
     warning:fraction>=.85?'critical':fraction>=.7?'warning':null,
-    db:{prepare:wrap,async batch(statements){check();const result=await db.batch(statements.map(statement=>{const original=originals.get(statement);if(!original)throw new Error('Foreign usage statement');return original();}));result.forEach(record);return result;}},
+    db:{prepare:wrap,async batch(statements){check();try{const result=await db.batch(statements.map(statement=>{const original=originals.get(statement);if(!original)throw new Error('Foreign usage statement');return original();}));result.forEach(record);return result;}catch(error){unknown=true;throw error;}}},
     async finish(){
       // Unknown/failed SQL keeps the entire reservation. Successful observations
       // may exceed it; record that excess rather than silently clamping it.

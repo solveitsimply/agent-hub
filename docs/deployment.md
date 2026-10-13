@@ -1,7 +1,7 @@
 # Deploy your own Agent Hub
 
 For paid-plan safeguards, usage budgets and warning behavior, see
-[cost protection](cost-protection.md). Apply migration 0011 before enabling
+[cost protection](cost-protection.md). Apply migration 0014 before enabling
 `HUB_USAGE_LIMITS_JSON`; preserve a verified private backup before migrations.
 
 Use Node 22.21.1 or later. Wrangler is a development tool; the verified version

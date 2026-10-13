@@ -11,7 +11,7 @@ Verify the private configuration uses the same ceiling. Waiting for D1 is not
 CPU time. CPU limits do not cap request counts or database work.
 
 Set `HUB_USAGE_LIMITS_JSON` to `{}` to enable the default daily budgets after
-applying migration `0011_usage_budgets.sql`. Defaults are 10000 admitted
+applying migration `0014_usage_budgets.sql`. Defaults are 10000 admitted
 operations, 100 million D1 rows read and 100000 rows written per UTC day.
 The default per-operation reservations are 1 million reads and 1000 writes;
 all five positive integer settings are configurable. Omit the variable to
@@ -28,7 +28,7 @@ are reasons these counters cannot serve as billing proof. Small budgets may
 pause valid work early. A failed response can follow a committed mutation:
 check its outcome and use the original idempotency key before retrying.
 
-Normal API calls and daily retention share the daily budget. Exhaustion returns
+Normal API calls, remote MCP/OAuth and daily retention share the daily budget. Exhaustion returns
 `429 HUB_DAILY_BUDGET` with `Retry-After` until 00:00 UTC. Retention prunes counter
 rows older than 90 days; counters contain no principal IDs or message contents.
 Existing message/session custody and authorization checks still apply.
