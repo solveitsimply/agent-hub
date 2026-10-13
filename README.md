@@ -56,6 +56,9 @@ SQLite database and loses its data on exit. Use only synthetic data and tokens.
 
 ## Deploy your own instance
 
+For a native Mac window connecting to your hosted instance, see
+[Agent Hub for macOS](docs/macos.md).
+
 Follow [Cloudflare deployment](docs/deployment.md) to create D1, configure your
 Worker, apply migrations and set an owner secret. Configuration examples contain
 placeholders. Keep your real deployment settings in your private project or
