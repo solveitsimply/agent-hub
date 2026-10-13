@@ -14,6 +14,61 @@ function fixture(t,options){
 async function actor(f,name='actor',project='sample'){const r=await f.call(OWNER,'/api/principals',{name,account:name+'@example.test',projects:[project]});assert.equal(r.status,201);return r.body;}
 async function session(f,a,externalId=crypto.randomUUID(),status='RUNNING',project='sample'){const r=await f.call(a.token,'/api/sessions',{externalId,machine:'fixture',label:externalId,project,status,task:'Synthetic coordination'});assert.equal(r.status,201);return r.body.session;}
 const payload=(x,y,key=crypto.randomUUID(),body='hello')=>({fromSessionId:x.id,toSessionId:y.id,project:'sample',kind:'NOTE',body,idempotencyKey:key});
+const registration=externalId=>({externalId,machine:'fixture',label:'Synthetic task',project:'sample',status:'RUNNING',task:'Synthetic coordination'});
+
+test('session budgets report actual account/workspace usage, warn before full and preserve exact retries',async t=>{
+  const f=fixture(t),a=await actor(f),b=await actor(f,'peer');
+  f.env.SESSION_LIMITS_JSON=JSON.stringify({activePrincipal:5,activeWorkspace:10,retainedPrincipal:10,retainedWorkspace:20});
+  const first=await session(f,a);
+  await session(f,a,crypto.randomUUID(),'BLOCKED');await session(f,a,crypto.randomUUID(),'DONE');await session(f,a);await session(f,b);
+  const budgets=(await f.call(a.token,'/api/limits')).body.sessions;
+  assert.deepEqual(budgets.usage,{activePrincipal:4,activeWorkspace:5,retainedPrincipal:4,retainedWorkspace:5});
+  assert.deepEqual(budgets.warnings,[{scope:'activePrincipal',used:4,limit:5,level:'near'}]);
+  assert.deepEqual(budgets.blockedBy,[]);
+  await session(f,a);
+  const refused=await f.call(a.token,'/api/sessions',registration('new-task'));
+  assert.equal(refused.status,409);assert.equal(refused.body.error.code,'SESSION_CAPACITY');
+  assert.deepEqual(refused.body.error.capacity.blockedBy,['activePrincipal']);
+  assert.match(refused.body.error.message,/activePrincipal 5\/5/);
+  assert.equal(refused.body.error.capacity.usage.activeWorkspace,6);
+  assert.equal((await f.call(a.token,'/api/sessions',registration(first.externalId))).status,200);
+  const other=(await f.call(b.token,'/api/limits')).body.sessions;
+  assert.equal(other.usage.activePrincipal,1);assert.equal(other.usage.retainedPrincipal,1);
+  assert.ok(!JSON.stringify(other).includes(a.principal.id),'numeric workspace totals disclose no foreign identity');
+  assert.equal((await f.call(b.token,'/api/limits?sessionId='+first.id)).status,403);
+  await f.call(OWNER,'/api/principals/'+a.principal.id,{},'DELETE');
+  assert.equal((await f.call(a.token,'/api/limits')).status,401);
+});
+
+test('archive recovers active capacity but retained refusal names the independently exhausted quota',async t=>{
+  const f=fixture(t),a=await actor(f);
+  f.env.SESSION_LIMITS_JSON=JSON.stringify({activePrincipal:1,activeWorkspace:2,retainedPrincipal:1,retainedWorkspace:3});
+  const done=await session(f,a,crypto.randomUUID(),'DONE');
+  const full=await f.call(a.token,'/api/sessions',registration('second'));
+  assert.deepEqual(full.body.error.capacity.blockedBy,['activePrincipal','retainedPrincipal']);
+  assert.equal((await f.call(a.token,'/api/sessions/'+done.id+'/archive',{})).status,200);
+  const refused=await f.call(a.token,'/api/sessions',registration('second'));
+  assert.deepEqual(refused.body.error.capacity.blockedBy,['retainedPrincipal']);
+  assert.match(refused.body.error.message,/retainedPrincipal 1\/1/);
+  assert.equal(refused.body.error.capacity.usage.activePrincipal,0);
+  assert.equal((await f.call(a.token,'/api/limits')).body.sessions.usage.retainedPrincipal,1);
+});
+
+test('workspace ceilings account across principals without pretending the current account is full',async t=>{
+  const f=fixture(t),a=await actor(f),b=await actor(f,'peer');
+  f.env.SESSION_LIMITS_JSON=JSON.stringify({activePrincipal:2,activeWorkspace:2,retainedPrincipal:3,retainedWorkspace:3});
+  const done=await session(f,a,crypto.randomUUID(),'DONE');await session(f,a);
+  const active=await f.call(b.token,'/api/sessions',registration('peer-one'));
+  assert.deepEqual(active.body.error.capacity.blockedBy,['activeWorkspace']);
+  assert.equal(active.body.error.capacity.usage.activePrincipal,0);
+  await f.call(a.token,'/api/sessions/'+done.id+'/archive',{});
+  await session(f,b);
+  const peerDone=f.DB.database.prepare('SELECT id FROM sessions WHERE principal_id=?').get(b.principal.id).id;
+  await f.call(b.token,'/api/sessions/'+peerDone,{status:'DONE'},'PATCH');await f.call(b.token,'/api/sessions/'+peerDone+'/archive',{});
+  const retained=await f.call(b.token,'/api/sessions',registration('peer-two'));
+  assert.deepEqual(retained.body.error.capacity.blockedBy,['retainedWorkspace']);
+  assert.equal(retained.body.error.capacity.usage.retainedPrincipal,1);
+});
 function legacyDuplicate(f,a,external,status='DONE'){
   const id=crypto.randomUUID();f.DB.database.prepare('INSERT INTO sessions(id,principal_id,external_id,machine,label,project,task,status,created_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,a.principal.id,external,'fixture',external,'sample','Synthetic duplicate',status,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z');return {id};
 }

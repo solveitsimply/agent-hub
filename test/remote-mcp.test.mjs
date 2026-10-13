@@ -45,9 +45,13 @@ test('scoped consent, PKCE, discovery and reads preserve exact identity and do n
   r=await f.approve(b);const code=new URL(r.headers.get('location')).searchParams.get('code');const tokenResponse=await f.exchange(code),tokens=await tokenResponse.json();assert.equal(tokenResponse.status,200);
   const stored=JSON.stringify(f.DB.database.prepare('SELECT * FROM mcp_oauth_requests').all())+JSON.stringify(f.DB.database.prepare('SELECT * FROM mcp_oauth_grants').all())+JSON.stringify(f.DB.database.prepare('SELECT * FROM mcp_oauth_tokens').all());for(const secret of [f.actor.token,code,tokens.access_token,tokens.refresh_token])assert.ok(!stored.includes(secret));
   let result=await f.rpc(tokens.access_token,'initialize',{protocolVersion:'2025-11-25'});assert.equal(result.status,200);assert.equal(result.body.result.protocolVersion,'2025-11-25');
-  result=await f.rpc(tokens.access_token,'tools/list');assert.deepEqual(result.body.result.tools.map(t=>t.name),['hub_connection_info','hub_list_sessions','hub_read_conversations','hub_read_inbox','hub_send_message']);
+  result=await f.rpc(tokens.access_token,'tools/list');assert.deepEqual(result.body.result.tools.map(t=>t.name),['hub_connection_info','hub_read_session','hub_list_sessions','hub_read_conversations','hub_read_inbox','hub_send_message']);
   result=await f.call(tokens.access_token,'hub_connection_info');assert.equal(result.body.result.structuredContent.sessionId,f.own.id);assert.equal(result.body.result.structuredContent.principal.id,f.actor.principal.id);
   result=await f.call(tokens.access_token,'hub_list_sessions');assert.equal(result.body.result.isError,false);assert.ok(result.body.result.structuredContent.sessions.every(s=>s.project==='alpha'));
+  result=await f.call(tokens.access_token,'hub_read_session',{sessionId:f.peerSession.id});assert.equal(result.body.result.isError,false);assert.equal(result.body.result.structuredContent.session.id,f.peerSession.id);
+  result=await f.call(tokens.access_token,'hub_read_session',{sessionId:f.outside.id});assert.equal(result.body.result.isError,true,'known IDs cannot bypass project custody');
+  f.DB.database.prepare("UPDATE sessions SET status='DONE',archived_at=? WHERE id=?").run(new Date().toISOString(),f.peerSession.id);
+  result=await f.call(tokens.access_token,'hub_read_session',{sessionId:f.peerSession.id});assert.equal(result.body.result.isError,false);assert.ok(result.body.result.structuredContent.session.archivedAt);
   assert.equal((await f.api(tokens.access_token,'/api/me')).status,401);assert.equal(f.DB.database.prepare('SELECT COUNT(*) AS n FROM sessions').get().n,before);
 });
 

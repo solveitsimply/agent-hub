@@ -1,7 +1,7 @@
 // Shared CLI/MCP query contract. Validation failures never broaden a search.
 import { HubClientError } from './client-error.mjs';
 
-export const sessionFilterNames = ['project','agentName','agentModel','machine','environment','repository','branch','status','attention'];
+export const sessionFilterNames = ['project','agentName','agentModel','machine','environment','repository','branch','status','attention','offset'];
 export const sessionFlagNames = ['agentNameUnknown','agentModelUnknown','machineUnknown','environmentUnknown','repositoryUnknown','branchUnknown','staleOnly'];
 
 export function readQuery(args, names, flags = [], maximum = 200) {
@@ -13,7 +13,9 @@ export function readQuery(args, names, flags = [], maximum = 200) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) throw new HubClientError('INVALID_ARGUMENT', `limit must be 1 to ${maximum}.`);
   const query = {view,limit};
   for (const key of names) if (args[key] !== undefined) {
-    if (key === 'after') {
+    if (key === 'offset') {
+      if (!Number.isSafeInteger(args[key]) || args[key] < 0 || args[key] > 2000) throw new HubClientError('INVALID_ARGUMENT','offset must be an integer from 0 to 2000.');
+    } else if (key === 'after') {
       if (!Number.isSafeInteger(args[key]) || args[key] < 0) throw new HubClientError('INVALID_ARGUMENT','after must be a nonnegative integer.');
     } else if (typeof args[key] !== 'string' || !args[key].trim()) throw new HubClientError('INVALID_ARGUMENT', `${key} must be a nonempty string.`);
     if (key === 'direction' && !['incoming','all'].includes(args[key])) throw new HubClientError('INVALID_ARGUMENT','direction must be incoming or all.');
@@ -41,7 +43,7 @@ export function cliOptions(argv, names, flags = []) {
     else {
       const value=argv[++index];
       if (!value || value.startsWith('--')) throw new HubClientError('USAGE', `Missing value for ${arg}`);
-      options[key]=key==='limit'?Number(value):value;
+      options[key]=['limit','offset'].includes(key)?Number(value):value;
     }
   }
   return {options,positional};

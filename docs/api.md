@@ -184,6 +184,17 @@ Exact idempotent retries remain valid at capacity and never increment counters.
 
 `SESSION_LIMITS_JSON` accepts `activePrincipal`, `activeWorkspace`,
 `retainedPrincipal` and `retainedWorkspace`. Defaults are 500/2000/10000/100000.
+GET `/api/limits` includes `sessions: {limits, usage, blockedBy, warnings}`.
+Usage is the authenticated principal's counts plus aggregate workspace counts;
+it never includes another principal's identity. A warning starts at 80% usage.
+`SESSION_CAPACITY` errors include the same `error.capacity` snapshot and name
+each exhausted quota with actual usage/limit values. The snapshot is diagnostic,
+not a reservation; atomic admission remains authoritative. Existing exact
+registration retries work at capacity. If admission changes before explanation,
+`SESSION_ADMISSION_CHANGED` asks the client to reconcile the exact registration.
+All unarchived registrations count as active, including BLOCKED and DONE.
+Archiving frees only active capacity; all retained records still count. There
+is no automatic history deletion or age-based completion.
 Active workspace capacity cannot exceed the complete 2000-session discovery
 bound. Owned sender discovery follows bounded offset pages of at most 200.
 Archive only reported DONE registrations after their claims are released;
@@ -249,3 +260,7 @@ scope. Receiving agents retain their own approval requirements and verify any
 consequential authorization through their trusted human channel. A coordinator
 may send ordinary coordination messages under standing human authorization;
 that authorization never permits it to invent human decisions.
+
+`GET /api/sessions/:id` returns `{session}` for a known active or archived session in the caller's project scope, resolving merged IDs to the canonical session. It preserves read custody and performs no registration or status write. Reuse the saved ID for lifecycle checks. Ordinary compact listings select the page in SQL before loading lifecycle/history; full summaries and text/attention searches retain their complete authorized baseline.
+
+Session PATCH optionally accepts `expectedRevision` and `expectedLastSeenAt` copied from an exact receipt, `requireUnclaimed:true`, and `requireUnobserved:true`. A concurrent material report, heartbeat, held ownership or an enrolled native observer rejects the guarded write with `409 SESSION_CHANGED`. Use these guards when reconciling provisional records; an ended native turn alone never proves objective completion.

@@ -17,6 +17,7 @@
     registering: false,
     sessionFilterOptions: { agentNames: [], agentModels: [], machines: [], environments: [], branches: [] },
     sessionSummary: null,
+    sessionCapacity: null,
     sessionTotal: 0,
     sessionLimit: 200,
     messages: [],
@@ -62,6 +63,7 @@
     connectPanel: $('connect-panel'), connectForm: $('connect-form'), connectToken: $('hub-token'),
     workspace: $('workspace'), connection: $('connection-state'), refresh: $('refresh-button'), logout: $('logout-button'),
     summary: $('principal-summary'), sessions: $('session-list'), sessionEmpty: $('session-empty'),
+    capacity: $('session-capacity'),
     copyAgentSetup: $('copy-agent-setup'), setupFallback: $('agent-setup-fallback'), setupText: $('agent-setup-text'), closeSetup: $('close-agent-setup'),
     summaryRunning: $('summary-running'), summaryWaitingUser: $('summary-waiting-user'), summaryWaitingAgent: $('summary-waiting-agent'), summaryBlocked: $('summary-blocked'), summaryStale: $('summary-stale'),
     sessionSearch: $('session-search'), messageSearch: $('message-search'),
@@ -864,6 +866,23 @@
         };
       }
       state.sessionSummary = sessionPayload.summary ?? null;
+      try {
+        const budgets = await request('/limits');
+        if (generation !== state.generation) return;
+        state.sessionCapacity = budgets.sessions ?? null;
+      } catch (error) {
+        if (error instanceof StaleRequestError) throw error;
+        state.sessionCapacity = null;
+      }
+      const capacity = state.sessionCapacity;
+      el.capacity.hidden = !capacity;
+      el.capacity.classList.toggle('capacity-warning', Boolean(capacity?.warnings?.length));
+      if (capacity) {
+        const labels = {activePrincipal:'Your account unarchived',activeWorkspace:'Workspace unarchived',retainedPrincipal:'Your account history',retainedWorkspace:'Workspace history'};
+        el.capacity.textContent = Object.keys(labels).map(key => `${labels[key]}: ${capacity.usage[key]}/${capacity.limits[key]}`).join(' · ')
+          + (capacity.warnings.length ? ' · Capacity warning: ' + capacity.warnings.map(item => `${labels[item.scope]} ${item.level === 'full' ? 'full' : 'at least 80% used'}`).join('; ') : '')
+          + '. DONE and BLOCKED count until archived; archiving frees unarchived slots only.';
+      }
       state.sessionTotal = Number.isFinite(sessionPayload.total) ? sessionPayload.total : state.sessions.length;
       state.sessionLimit = Number.isFinite(sessionPayload.limit) && sessionPayload.limit > 0 ? sessionPayload.limit : 200;
       if (state.selectedSessionId) {
@@ -1114,6 +1133,9 @@
     state.token = null;
     state.principal = null;
     state.sessions = [];
+    state.sessionCapacity = null;
+    el.capacity.hidden = true;
+    el.capacity.textContent = '';
     state.preferredSenderId = '';
     state.registering = false;
     el.registrationForm.reset();

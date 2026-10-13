@@ -182,6 +182,7 @@ const paging={after:uint,limit:{type:'integer',minimum:1,maximum:100},view:{type
 const tool=(name,title,description,properties,required=[],write=false)=>({name,title,description:description+' '+NOTICE,inputSchema:schema(properties,required),annotations:{readOnlyHint:!write,destructiveHint:false,idempotentHint:!write,openWorldHint:write},securitySchemes:[{type:'oauth2',scopes:write?['hub:read','hub:message']:['hub:read']}]});
 const TOOLS=[
   tool('hub_connection_info','Read connection scope','Read the authenticated Coordinator identity, fixed project and exact own session. No status write.',{}),
+  tool('hub_read_session','Read known session','Read a known session in the connection project without listing or registration.',{sessionId:str},['sessionId']),
   tool('hub_list_sessions','Find project sessions','Find enrolled sessions in the connection project. Compact by default.',{limit:{type:'integer',minimum:1,maximum:200},offset:{type:'integer',minimum:0,maximum:2000},view:paging.view,status:{type:'string',enum:['RUNNING','WAITING_ON_USER','WAITING_ON_AGENT','BLOCKED','DONE']}}),
   tool('hub_read_conversations','Read project conversations','Read project-wide coordination including owner questions. Message-ID cursors are separate from inbox delivery cursors.',{...paging,sessionId:str,kind,before:uint,latest:{type:'boolean',const:true}}),
   tool('hub_read_inbox','Read own inbox','Read only this connection session inbox. Defaults incoming. Save the cursor after processing; no repeated polling or automatic acknowledgments.',{...paging,kind,direction:{type:'string',enum:['incoming','all']}}),
@@ -223,6 +224,7 @@ async function mcp(c,ctx,db){
     if(selected.name==='hub_connection_info')data={principal:{id:grant.principal_id,name:grant.name,profile:'coordinator'},project:grant.project,sessionId:grant.session_id,scopes:grant.scope.split(' '),grantId:grant.id,expiresAt:new Date(grant.expires_at*1000).toISOString()};
     else{
       let path,method='GET',payload,query={view:args.view??'compact',limit:args.limit??20};
+      if(selected.name==='hub_read_session'){path='/api/sessions/'+encodeURIComponent(args.sessionId);query={};}
       if(selected.name==='hub_list_sessions'){path='/api/sessions';query={...query,project:grant.project,...(args.offset!==undefined?{offset:args.offset}:{}),...(args.status?{status:args.status}:{})};}
       if(selected.name==='hub_read_conversations'){path='/api/conversations';query={...query,...args,project:grant.project};if(query.latest)query.latest='1';}
       if(selected.name==='hub_read_inbox'){path='/api/messages';query={...query,...args,sessionId:grant.session_id,project:grant.project,direction:args.direction??'incoming'};}
