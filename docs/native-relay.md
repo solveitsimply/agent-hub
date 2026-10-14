@@ -8,7 +8,7 @@ Review and apply additive migration **0015_native_relay.sql** to the existing da
 
 Enable `NATIVE_RELAY_ENABLED=true` only with `HUB_USAGE_LIMITS_JSON` configured and `HUB_TRAFFIC_GUARD_REQUIRED=true` backed by the existing traffic guard bindings. The relay refuses operation without these controls. The example configuration leaves the feature off. Ordinary invitation and observer tokens cannot authenticate a device endpoint.
 
-The foreground client pilot requires the receiving ai-profiles app visible and focused. It performs one device-wide check per minute, backs off failures and respects provider Retry-After. It refreshes unchanged signed metadata every ten minutes. Background delivery, push infrastructure and unattended model initiation are not implemented. Sleeping/offline receivers do not acquire an automatic resend when they return.
+The ai-profiles 1.7.1 client receives in its native app process while the Mac is awake, including when its window is unfocused or closed to the menu bar. Quitting stops receiving. It performs one device-wide check per minute, backs off failures and respects provider Retry-After. It refreshes unchanged signed metadata every ten minutes. Slow checks and waking from sleep do not replay missed ticks. No login item, external daemon, push infrastructure or unattended model initiation is added. Sleeping/offline receivers do not acquire an automatic resend when they return.
 
 ## Explicit device enrollment
 
@@ -69,7 +69,7 @@ Claim/reply bodies use `peerId`, queue `requestId`, `operation`, and respectivel
 
 Admission limits are ten outstanding requests per receiving device, 100 new queued operations per sending device per UTC day, 5,000 retained request tombstones and 128 device records. Indexed pending reads and counters avoid project-wide/chat-wide scans. Duplicate admission consumes no new queue slot. Request bodies are removed on claim, explicit revocation, expiry cleanup during receiver checks, or daily retention. Expired pending bodies may remain stored until that cleanup; they cannot be delivered. Tombstones and signed body-free replies remain for at most 30 days under the existing daily retention job. Disabled deployments preserve existing records until an operator chooses cleanup.
 
-For planning, eight foreground hours produce at most 480 pending checks plus approximately 48 unchanged metadata publications per device: **528 HTTP requests/day** before sends, retries from explicit user actions, or other Hub usage. Three such devices total about **1,584/day**. Opening/reviewing/sending a native message can add up to three queued operations, each with one enqueue, at most twelve receipt reads, two peer-metadata reads, and two receiver claim/reply writes: conservatively **51 HTTP requests per message**. Successful fast replies usually need fewer reads. These are client request-count bounds, not measured D1 billing.
+For planning, twenty-four awake hours with the receiving app running produce at most 1,440 pending checks plus approximately 144 unchanged metadata publications per device: **1,584 HTTP requests/day** before sends, retries from explicit user actions, or other Hub usage. Three such devices total about **4,752/day**. Background receiving consumes the existing deployment budgets without raising them; budget exhaustion pauses the relay. Opening/reviewing/sending a native message can add up to three queued operations, each with one enqueue, at most twelve receipt reads, two peer-metadata reads, and two receiver claim/reply writes: conservatively **51 HTTP requests per message**. Successful fast replies usually need fewer reads. These are client request-count bounds, not measured D1 billing.
 
 Local query-plan tests prove indexed pending lookup and atomic admission counters. They do not establish provider `rows_read`, `rows_written`, CPU or remaining account capacity. Measure those actual values for an idle check and complete send against the operator's budget before enabling a pilot. The existing application budget includes reservation/accounting overhead; it is not an account-wide billing cap. No model calls run in idle checks.
 
@@ -96,6 +96,6 @@ An isolated empty receiver check advanced the Hub's conservative meter by one
 request, 17 read rows and 10 written rows. Full pilot-window counters include
 concurrent Hub traffic and are not an isolated per-message billing measurement.
 Device invitations, native runtime/version checks, per-profile receiving grants,
-foreground-only processing and unknown/no-resend policy remain necessary. Private
+a running receiving app and unknown/no-resend policy remain necessary. Private
 identities, tokens, deployment settings and raw runtime evidence stay outside
 this public repository.
