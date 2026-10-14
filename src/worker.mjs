@@ -1,9 +1,11 @@
 import { searchTerm, messageFilters } from './message-filters.mjs';
 import {admitUsage,usageStatus,limitTraffic,untilUsageReset} from './cost-guard.mjs';
+import {nativeRelayApi,nativeRelayEnrollment} from './native-relay.mjs';
 import { remoteMcp, isRemoteMcpPath, mcpGrantPredicate, checkMcpGrant } from './remote-mcp.mjs';
 import { accessApi } from './access-api.mjs';
 import {coordinationDatabaseSession,inboxCursorIndexes,hasCoordinationSchema,messagePolicy,sessionPolicy,sessionCapacity,explainSessionCapacity,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
+import {sessionLocationApi} from './session-location.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
 import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint } from './lifecycle.mjs';
@@ -57,10 +59,10 @@ const noSecrets = value=>{
   if(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+[\w.+/=~-]{16,}|\b(?:hub_agent_|hub_owner_|hub_observer_)[A-Za-z0-9_-]{20,}|\b(?:sk-|AIza)[A-Za-z0-9_-]{20,}|\b(?:password|api[_ -]?key|access[_ -]?token|verification[_ -]?code|step[_ -]?up[_ -]?code)\s*[=:]\s*["']?\S{4,}/i.test(value))
     fail(422,'SECRET_DETECTED','Remove credentials or verification codes before sharing coordination content.');
 };
-async function bodyOf(request){
+async function bodyOf(request,maximum=16384){
   if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))fail(415,'JSON_REQUIRED','Use application/json.');
   const reader=request.body?.getReader();let size=0;const chunks=[];
-  if(reader){while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>16384){await reader.cancel();fail(413,'BODY_TOO_LARGE','Coordination bodies are limited to 16 KiB.');}chunks.push(value);}}
+  if(reader){while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>maximum){await reader.cancel();fail(413,'BODY_TOO_LARGE','Request exceeds its bounded body limit.');}chunks.push(value);}}
   const data=new Uint8Array(size);let offset=0;for(const chunk of chunks){data.set(chunk,offset);offset+=chunk.length;}
   let body;try{body=JSON.parse(new TextDecoder().decode(data));}catch{fail(400,'INVALID_JSON','Provide a JSON object.');}
   if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'INVALID_JSON','Provide a JSON object.');
@@ -184,10 +186,13 @@ async function api(request,env,delegatedPrincipal=null){
 }
 async function apiWithDatabase(request,env,db,url,delegatedPrincipal=null){
   db=coordinationDatabaseSession(env.DB,db);
+  if(url.pathname.startsWith('/api/native-relay/'))return nativeRelayApi({request,env,db,url,readBody:()=>bodyOf(request,49152),digest,fail,json});
   if(url.pathname.startsWith('/api/observer/')||url.pathname==='/api/observer'||request.headers.get('authorization')?.startsWith('Bearer hub_observer_'))return observerApi({request,db,path:url.pathname,method:request.method,readBody:()=>bodyOf(request),digest,fail,checkKeys,string,json});
   const principal=delegatedPrincipal??await authenticate(request,env,db),aliases=machineAliases(env.MACHINE_ALIASES_JSON);
   const readBody=async()=>{const body=await bodyOf(request);await requireCurrent(db,principal);return body;};
   const path=url.pathname,method=request.method;
+  const nativeEnrollment=await nativeRelayEnrollment({path,method,env,db,principal,readBody,digest,fail,json});
+  if(nativeEnrollment)return nativeEnrollment;
   const coordination=await hasCoordinationSchema(db);
   if(principal.profile==='observer'&&method!=='GET'&&path!=='/api/connections'&&!(path==='/api/sessions'&&method==='POST')&&!(/^\/api\/sessions\/[^/]+(?:\/(?:heartbeat|archive|attribution))?$/.test(path)&&['POST','PATCH'].includes(method)))fail(403,'OBSERVER_READ_ONLY','Project observers can read conversations and report their own sessions, but cannot send, acknowledge or manage coordination.');
   if(principal.profile==='coordinator'&&method!=='GET'&&path!=='/api/connections'&&path!=='/api/messages'&&!/^\/api\/messages\/\d+\/ack$/.test(path)&&!(path==='/api/sessions'&&method==='POST')&&!(/^\/api\/sessions\/[^/]+(?:\/(?:heartbeat|archive|attribution|checkpoint|closeout))?$/.test(path)&&['POST','PATCH','PUT'].includes(method)))fail(403,'COORDINATOR_SCOPE','Coordinators can message, relay owner-provided answers and report their own sessions; they cannot manage invitations, ownership or other sessions.');
@@ -195,6 +200,8 @@ async function apiWithDatabase(request,env,db,url,delegatedPrincipal=null){
   if(accessResponse)return accessResponse;
   const lifecycleResponse=await lifecycleApi({path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select:coordination?sessionHistorySelect(SESSION_SELECT):SESSION_SELECT,messageById,messageLimits:()=>messagePolicy(env,fail)});
   if(lifecycleResponse)return lifecycleResponse;
+  const location=await sessionLocationApi({path,method,db,principal,readBody,fail,checkKeys,string,sessionById,requireActive,requireCurrent,json,sessionView,aliases,audit,now});
+  if(location)return location;
   const management=await sessionManagementApi({path,method,db,principal,readBody,fail,checkKeys,string,ownerOnly,sessionById,requireActive,requireCurrent,json,sessionView,aliases,audit,now,machineName:value=>canonicalMachine(value,aliases)});
   if(management)return management;
   if(path==='/api/me'&&method==='GET')return json({principal});
@@ -379,6 +386,8 @@ async function apiWithDatabase(request,env,db,url,delegatedPrincipal=null){
       for(const flag of ['requireUnclaimed','requireUnobserved'])if(body[flag]!==undefined&&body[flag]!==true)fail(422,'INVALID_FIELD',`${flag} must be true when supplied.`);
       const label=body.label===undefined?row.label:string(body.label,'label',120);
       const task=body.task===undefined?row.task:string(body.task,'task',2000),previous=JSON.parse(row.details_json),details=body.details===undefined?previous:detailsOf(body.details);
+      if(body.details!==undefined && Object.hasOwn(body.details,'nativeLocation'))fail(422,'RESERVED_LOCATION','Use the guarded location reconciliation endpoint.');
+      if(body.details!==undefined && previous.nativeLocation!==undefined)details.nativeLocation=previous.nativeLocation;
       if(body.details!==undefined && previous.workContext!==undefined)details.workContext=previous.workContext;
       if(body.workContext!==undefined)details.workContext=parseWorkContext(body.workContext,fail);
       const environment=body.environment===undefined?row.environment:string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use local, dev, staging or production for the target application instance.');
@@ -550,6 +559,11 @@ export default {
     try{
     const cutoff=new Date(Date.now()-30*86400000).toISOString(),auditCutoff=new Date(Date.now()-90*86400000).toISOString();
     await db.batch([db.prepare('DELETE FROM messages WHERE created_at<?').bind(cutoff),db.prepare('DELETE FROM audit_events WHERE created_at<?').bind(auditCutoff)]);
+    if(env.NATIVE_RELAY_ENABLED==='true'){
+      await db.prepare('DELETE FROM native_relay_requests WHERE created_at<?').bind(Math.floor(Date.now()/1000)-30*86400).run();
+      await db.prepare('DELETE FROM native_relay_daily_usage WHERE day<?').bind(Math.floor(Date.now()/86400000)-30).run();
+      await db.prepare("UPDATE native_relay_requests SET state='expired',payload_json=NULL WHERE state='pending' AND expires_at<=?").bind(Math.floor(Date.now()/1000)).run();
+    }
     if(await hasCoordinationSchema(db))await db.prepare('DELETE FROM hub_message_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
     try{await db.prepare('DELETE FROM connection_events WHERE connected_at<?').bind(auditCutoff).run();}catch(error){if(!/no such table: connection_events/i.test(String(error.message)))throw error;}
     if(env.HUB_USAGE_LIMITS_JSON!==undefined)await db.prepare('DELETE FROM hub_daily_usage WHERE day<?').bind(auditCutoff.slice(0,10)).run();
