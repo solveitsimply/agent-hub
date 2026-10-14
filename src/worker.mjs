@@ -4,6 +4,7 @@ import { remoteMcp, isRemoteMcpPath, mcpGrantPredicate, checkMcpGrant } from './
 import { accessApi } from './access-api.mjs';
 import {coordinationDatabaseSession,inboxCursorIndexes,hasCoordinationSchema,messagePolicy,sessionPolicy,sessionCapacity,explainSessionCapacity,messageAdmission,messageCapacity,explainMessageCapacity,sessionMessageScope,sessionHistorySelect} from './coordination-capacity.mjs';
 import {canonicalSessionId,sessionManagementApi,registrationKeys} from './session-management.mjs';
+import {sessionLocationApi} from './session-location.mjs';
 import { compactSession, compactMessage } from './agent-view.mjs';
 import { parseAttribution, attributionView } from './attribution.mjs';
 import { ATTENTION, LIFECYCLE_COLUMNS, lifecycleView, parseCheckpoint } from './lifecycle.mjs';
@@ -195,6 +196,8 @@ async function apiWithDatabase(request,env,db,url,delegatedPrincipal=null){
   if(accessResponse)return accessResponse;
   const lifecycleResponse=await lifecycleApi({path,method,url,db,principal,readBody,fail,string,checkKeys,ownerOnly,sessionById,requireActive,requireCurrent,digest,json,sessionView,aliases,select:coordination?sessionHistorySelect(SESSION_SELECT):SESSION_SELECT,messageById,messageLimits:()=>messagePolicy(env,fail)});
   if(lifecycleResponse)return lifecycleResponse;
+  const location=await sessionLocationApi({path,method,db,principal,readBody,fail,checkKeys,string,sessionById,requireActive,requireCurrent,json,sessionView,aliases,audit,now});
+  if(location)return location;
   const management=await sessionManagementApi({path,method,db,principal,readBody,fail,checkKeys,string,ownerOnly,sessionById,requireActive,requireCurrent,json,sessionView,aliases,audit,now,machineName:value=>canonicalMachine(value,aliases)});
   if(management)return management;
   if(path==='/api/me'&&method==='GET')return json({principal});
@@ -379,6 +382,8 @@ async function apiWithDatabase(request,env,db,url,delegatedPrincipal=null){
       for(const flag of ['requireUnclaimed','requireUnobserved'])if(body[flag]!==undefined&&body[flag]!==true)fail(422,'INVALID_FIELD',`${flag} must be true when supplied.`);
       const label=body.label===undefined?row.label:string(body.label,'label',120);
       const task=body.task===undefined?row.task:string(body.task,'task',2000),previous=JSON.parse(row.details_json),details=body.details===undefined?previous:detailsOf(body.details);
+      if(body.details!==undefined && Object.hasOwn(body.details,'nativeLocation'))fail(422,'RESERVED_LOCATION','Use the guarded location reconciliation endpoint.');
+      if(body.details!==undefined && previous.nativeLocation!==undefined)details.nativeLocation=previous.nativeLocation;
       if(body.details!==undefined && previous.workContext!==undefined)details.workContext=previous.workContext;
       if(body.workContext!==undefined)details.workContext=parseWorkContext(body.workContext,fail);
       const environment=body.environment===undefined?row.environment:string(body.environment,'environment',32,true);if(environment&&!ENVIRONMENTS.includes(environment))fail(422,'INVALID_ENVIRONMENT','Use local, dev, staging or production for the target application instance.');
