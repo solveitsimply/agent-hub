@@ -80,3 +80,22 @@ Cloudflare's current [D1 pricing](https://developers.cloudflare.com/d1/platform/
 Synthetic tests exercise wrong keys, changed payloads, wrong origins/projects/targets, expiry and unknown schemas, competing claimants, crash-after-claim semantics, receipt conflicts, project/device revocation including mutation races, counter limits, fresh receipt-read nonces and explicit credential reenrollment. Existing inbox and ownership rows remain untouched. Provider-native Wrangler dry-run validates the Worker bundle. Hosted deployment, billing measurements and actual cloud-to-native delivery require a separately approved pilot; passing local tests does not establish them.
 
 Rollback disables the feature, revokes device tokens and disables the client relay. Local direct discovery/delivery remain available. Preserve native unknown journals and claimed tombstones; never replay them as a rollback operation. The migration is additive and does not alter existing coordination records.
+
+## Hosted pilot acceptance
+
+An owner-approved deployment applied migration 0015 after a verified private
+backup and retained its existing Worker, database, rate controls, daily budgets
+and retention schedule. The signed client completed inspect, prepare and one
+native delivery through the cloud queue to an existing disposable Codex chat.
+Both signature layers and the sender's durable native acceptance receipt
+verified. Read-only native history showed one exact user input, its requested
+assistant ACK and no tool calls; all queue bodies were removed. A forged outer
+signature was refused without admission or native input.
+
+An isolated empty receiver check advanced the Hub's conservative meter by one
+request, 17 read rows and 10 written rows. Full pilot-window counters include
+concurrent Hub traffic and are not an isolated per-message billing measurement.
+Device invitations, native runtime/version checks, per-profile receiving grants,
+foreground-only processing and unknown/no-resend policy remain necessary. Private
+identities, tokens, deployment settings and raw runtime evidence stay outside
+this public repository.
