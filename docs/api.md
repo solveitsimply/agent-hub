@@ -264,3 +264,7 @@ that authorization never permits it to invent human decisions.
 `GET /api/sessions/:id` returns `{session}` for a known active or archived session in the caller's project scope, resolving merged IDs to the canonical session. It preserves read custody and performs no registration or status write. Reuse the saved ID for lifecycle checks. Ordinary compact listings select the page in SQL before loading lifecycle/history; full summaries and text/attention searches retain their complete authorized baseline.
 
 Session PATCH optionally accepts `expectedRevision` and `expectedLastSeenAt` copied from an exact receipt, `requireUnclaimed:true`, and `requireUnobserved:true`. A concurrent material report, heartbeat, held ownership or an enrolled native observer rejects the guarded write with `409 SESSION_CHANGED`. Use these guards when reconciling provisional records; an ended native turn alone never proves objective completion.
+
+## Optional native relay
+
+The default-off [native relay pilot](native-relay.md) adds owner-issued device capabilities and bounded signed request/receipt transport under `/api/native-devices` and `/api/native-relay/*`. It requires additive migration 0015, enabled usage/traffic guards and a separately reviewed operator pilot. Ordinary invitation, coordinator and observer credentials receive no device authority. It changes no inbox cursor, acknowledgment, task or ownership claim, and a queue acknowledgement is never proof of native delivery. See the linked contract for exact schemas, revocation boundaries, limits and validation gates.
